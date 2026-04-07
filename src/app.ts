@@ -19,6 +19,7 @@ app.use(cors({
     origin: [
         "http://localhost:3000",
         "http://localhost:5173",
+        "http://testing.zyura-e.com",
         "https://ai-student-protal.netlify.app",
         "https://zyura-e.com",
         "https://www.zyura-e.com"
