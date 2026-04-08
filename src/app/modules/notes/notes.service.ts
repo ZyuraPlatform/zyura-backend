@@ -12,7 +12,7 @@ import { notes_model } from "./notes.schema";
 const create_new_notes_into_db = async (req: Request) => {
   try {
     const user = req.user;
-    const body = req.body;
+    const body = req.body as any;
     const isUserExist: any = await isAccountExist(
       user?.email as string,
       "profile_id",
@@ -29,6 +29,12 @@ const create_new_notes_into_db = async (req: Request) => {
       uploadedBy,
       notes: [],
       ...body,
+      // Normalize optional string fields to avoid schema validation issues
+      subtopic: (body?.subtopic ?? "").toString(),
+      profileType: (body?.profileType ?? "").toString().trim(),
+      subject: (body?.subject ?? "").toString().trim(),
+      system: (body?.system ?? "").toString().trim(),
+      topic: (body?.topic ?? "").toString().trim(),
     };
 
     // Handle file uploads
@@ -65,7 +71,8 @@ const create_new_notes_into_db = async (req: Request) => {
     }
     return result;
   } catch (err) {
-    console.log(err);
+    // Never swallow errors; otherwise controllers return success with null data.
+    throw err instanceof AppError ? err : new AppError((err as any)?.message || "Failed to create notes", 400);
   }
 };
 
