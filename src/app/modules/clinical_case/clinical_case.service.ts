@@ -45,6 +45,13 @@ const get_all_clinical_case_from_db = async (req: Request) => {
   } = query;
 
   const filter: any = {};
+  const trimOrEmpty = (v: unknown) => (typeof v === "string" ? v.trim() : "");
+  const searchTermTrim = trimOrEmpty(searchTerm);
+  const contentForTrim = trimOrEmpty(contentFor);
+  const subjectTrim = trimOrEmpty(subject);
+  const systemTrim = trimOrEmpty(system);
+  const topicTrim = trimOrEmpty(topic);
+  const subtopicTrim = trimOrEmpty(subtopic);
 
   // 🧠 Role-based filters
   if (req?.user?.role === "STUDENT") {
@@ -64,16 +71,16 @@ const get_all_clinical_case_from_db = async (req: Request) => {
   }
 
   // 🔍 Global search
-  if (searchTerm) {
-    filter.$or = [{ caseTitle: { $regex: searchTerm, $options: "i" } }];
+  if (searchTermTrim) {
+    filter.$or = [{ caseTitle: { $regex: searchTermTrim, $options: "i" } }];
   }
 
   // 🎯 Individual filters (regex-based – unchanged)
-  if (contentFor) filter.contentFor = contentFor;
-  if (subject) filter.subject = { $regex: subject, $options: "i" };
-  if (system) filter.system = { $regex: system, $options: "i" };
-  if (topic) filter.topic = { $regex: topic, $options: "i" };
-  if (subtopic) filter.subtopic = { $regex: subtopic, $options: "i" };
+  if (contentForTrim) filter.contentFor = contentForTrim;
+  if (subjectTrim) filter.subject = { $regex: subjectTrim, $options: "i" };
+  if (systemTrim) filter.system = { $regex: systemTrim, $options: "i" };
+  if (topicTrim) filter.topic = { $regex: topicTrim, $options: "i" };
+  if (subtopicTrim) filter.subtopic = { $regex: subtopicTrim, $options: "i" };
 
   // 🎯 Apply Goal-based Filter
   const goal = await goal_model.findOne({

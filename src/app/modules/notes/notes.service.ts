@@ -89,6 +89,13 @@ const get_all_notes_from_db = async (req: Request) => {
   } = req.query as any;
 
   const filters: any = {};
+  const trimOrEmpty = (v: unknown) => (typeof v === "string" ? v.trim() : "");
+  const searchTermTrim = trimOrEmpty(searchTerm);
+  const contentForTrim = trimOrEmpty(contentFor);
+  const subjectTrim = trimOrEmpty(subject);
+  const systemTrim = trimOrEmpty(system);
+  const topicTrim = trimOrEmpty(topic);
+  const subtopicTrim = trimOrEmpty(subtopic);
 
   // 🧠 Role-based filters
   if (req?.user?.role === "STUDENT") {
@@ -108,17 +115,17 @@ const get_all_notes_from_db = async (req: Request) => {
   }
 
   // 🧩 Manual filters
-  if (contentFor) filters.contentFor = contentFor;
-  if (subject) filters.subject = subject;
-  if (system) filters.system = system;
-  if (topic) filters.topic = topic;
-  if (subtopic) filters.subtopic = subtopic;
+  if (contentForTrim) filters.contentFor = contentForTrim;
+  if (subjectTrim) filters.subject = subjectTrim;
+  if (systemTrim) filters.system = systemTrim;
+  if (topicTrim) filters.topic = topicTrim;
+  if (subtopicTrim) filters.subtopic = subtopicTrim;
 
   // 🔍 Search filter
-  if (searchTerm.trim()) {
+  if (searchTermTrim) {
     filters.$or = [
-      { title: { $regex: searchTerm, $options: "i" } },
-      { description: { $regex: searchTerm, $options: "i" } },
+      { title: { $regex: searchTermTrim, $options: "i" } },
+      { description: { $regex: searchTermTrim, $options: "i" } },
     ];
   }
 

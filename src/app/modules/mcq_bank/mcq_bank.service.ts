@@ -149,7 +149,7 @@ const get_all_mcq_banks = async (req: Request) => {
 
   const filters: any = {};
 
-  // 🧠 Role-based content
+
   if (req?.user?.role === "STUDENT") {
     const student = await Student_Model.findOne({
       accountId: req?.user?.accountId,
@@ -166,7 +166,7 @@ const get_all_mcq_banks = async (req: Request) => {
     filters.profileType = professional?.professionName;
   }
 
-  // 🧩 Manual query filters
+
   if (contentFor) filters.contentFor = contentFor;
   if (subject) filters.subject = subject;
   if (system) filters.system = system;
@@ -176,7 +176,7 @@ const get_all_mcq_banks = async (req: Request) => {
     filters.title = { $regex: searchTerm, $options: "i" };
   }
 
-  // 🎯 Goal-based filter
+
   const goal = await goal_model.findOne({
     studentId: req?.user?.accountId,
     goalStatus: "IN_PROGRESS",
@@ -184,12 +184,12 @@ const get_all_mcq_banks = async (req: Request) => {
 
   const finalFilters = buildGoalContentFilter(goal, filters);
 
-  // 🔢 Pagination
+ 
   const pageNumber = parseInt(page, 10);
   const limitNumber = parseInt(limit, 10);
   const skip = (pageNumber - 1) * limitNumber;
 
-  // 🧾 Fetch
+
   const result = await McqBankModel.find(finalFilters)
     .skip(skip)
     .limit(limitNumber)
@@ -236,6 +236,13 @@ const get_all_mcq_banks_public_from_db = async (req: Request) => {
   } = req.query as any;
 
   const filters: any = {};
+  const trimOrEmpty = (v: unknown) => (typeof v === "string" ? v.trim() : "");
+  const subjectTrim = trimOrEmpty(subject);
+  const systemTrim = trimOrEmpty(system);
+  const topicTrim = trimOrEmpty(topic);
+  const subtopicTrim = trimOrEmpty(subtopic);
+  const searchTermTrim = trimOrEmpty(searchTerm);
+  const contentForTrim = trimOrEmpty(contentFor);
 
   // 🧠 Role-based content
   if (req?.user?.role === "STUDENT") {
@@ -255,13 +262,13 @@ const get_all_mcq_banks_public_from_db = async (req: Request) => {
   }
 
   // 🧩 Manual query filters
-  if (contentFor) filters.contentFor = contentFor;
-  if (subject) filters.subject = subject;
-  if (system) filters.system = system;
-  if (topic) filters.topic = topic;
-  if (subtopic) filters.subtopic = subtopic;
-  if (searchTerm) {
-    filters.title = { $regex: searchTerm, $options: "i" };
+  if (contentForTrim) filters.contentFor = contentForTrim;
+  if (subjectTrim) filters.subject = subjectTrim;
+  if (systemTrim) filters.system = systemTrim;
+  if (topicTrim) filters.topic = topicTrim;
+  if (subtopicTrim) filters.subtopic = subtopicTrim;
+  if (searchTermTrim) {
+    filters.title = { $regex: searchTermTrim, $options: "i" };
   }
 
 

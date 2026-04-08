@@ -45,8 +45,16 @@ const get_all_osce_from_db = async (req: Request) => {
   } = query;
 
   const filter: any = {};
+  const trimOrEmpty = (v: unknown) => (typeof v === "string" ? v.trim() : "");
+  const searchTermTrim = trimOrEmpty(searchTerm);
+  const contentForTrim = trimOrEmpty(contentFor);
+  const subjectTrim = trimOrEmpty(subject);
+  const systemTrim = trimOrEmpty(system);
+  const topicTrim = trimOrEmpty(topic);
+  const subtopicTrim = trimOrEmpty(subtopic);
+  const studentTypeTrim = trimOrEmpty(studentType);
 
-  // 🧠 Role-based filters
+
   if (req?.user?.role === "STUDENT") {
     const student = await Student_Model.findOne({
       accountId: req?.user?.accountId,
@@ -63,20 +71,21 @@ const get_all_osce_from_db = async (req: Request) => {
     filter.profileType = professional?.professionName;
   }
 
-  // 🔍 Global search
-  if (searchTerm) {
-    filter.$or = [{ name: { $regex: searchTerm, $options: "i" } }];
+ 
+  if (searchTermTrim) {
+    filter.$or = [{ name: { $regex: searchTermTrim, $options: "i" } }];
   }
 
-  // 🎯 Individual filters (unchanged)
-  if (contentFor) filter.contentFor = contentFor;
-  if (subject) filter.subject = { $regex: subject, $options: "i" };
-  if (system) filter.system = { $regex: system, $options: "i" };
-  if (topic) filter.topic = { $regex: topic, $options: "i" };
-  if (subtopic) filter.subtopic = { $regex: subtopic, $options: "i" };
-  if (studentType) filter.studentType = { $regex: studentType, $options: "i" };
+  
+  if (contentForTrim) filter.contentFor = contentForTrim;
+  if (subjectTrim) filter.subject = { $regex: subjectTrim, $options: "i" };
+  if (systemTrim) filter.system = { $regex: systemTrim, $options: "i" };
+  if (topicTrim) filter.topic = { $regex: topicTrim, $options: "i" };
+  if (subtopicTrim) filter.subtopic = { $regex: subtopicTrim, $options: "i" };
+  if (studentTypeTrim)
+    filter.studentType = { $regex: studentTypeTrim, $options: "i" };
 
-  // 🎯 Apply goal-based filter
+
   const goal = await goal_model.findOne({
     studentId: req?.user?.accountId,
     goalStatus: "IN_PROGRESS",
@@ -84,7 +93,7 @@ const get_all_osce_from_db = async (req: Request) => {
 
   const finalFilter = buildGoalContentFilter(goal, filter);
 
-  // 🔢 Pagination
+ 
   const skip = (Number(page) - 1) * Number(limit);
 
   const [result, total] = await Promise.all([

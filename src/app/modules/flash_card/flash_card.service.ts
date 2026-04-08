@@ -104,8 +104,15 @@ const get_all_flash_cards_from_db = async (req: Request) => {
   } = req.query as any;
 
   const filters: any = {};
+  const trimOrEmpty = (v: unknown) => (typeof v === "string" ? v.trim() : "");
+  const searchTermTrim = trimOrEmpty(searchTerm);
+  const contentForTrim = trimOrEmpty(contentFor);
+  const subjectTrim = trimOrEmpty(subject);
+  const systemTrim = trimOrEmpty(system);
+  const topicTrim = trimOrEmpty(topic);
+  const subtopicTrim = trimOrEmpty(subtopic);
 
-  // 🧠 Role-based filters
+
   if (req?.user?.role === "STUDENT") {
     const student = await Student_Model.findOne({
       accountId: req?.user?.accountId,
@@ -122,22 +129,20 @@ const get_all_flash_cards_from_db = async (req: Request) => {
     filters.profileType = professional?.professionName;
   }
 
-  // 🧩 Manual query filters
-  if (contentFor) filters.contentFor = contentFor;
-  if (subject) filters.subject = subject;
-  if (system) filters.system = system;
-  if (topic) filters.topic = topic;
-  if (subtopic) filters.subtopic = subtopic;
+  if (contentForTrim) filters.contentFor = contentForTrim;
+  if (subjectTrim) filters.subject = subjectTrim;
+  if (systemTrim) filters.system = systemTrim;
+  if (topicTrim) filters.topic = topicTrim;
+  if (subtopicTrim) filters.subtopic = subtopicTrim;
 
-  // 🔍 Search filter
-  if (searchTerm.trim()) {
+
+  if (searchTermTrim) {
     filters.$or = [
-      { title: { $regex: searchTerm, $options: "i" } },
-      { description: { $regex: searchTerm, $options: "i" } },
+      { title: { $regex: searchTermTrim, $options: "i" } },
+      { description: { $regex: searchTermTrim, $options: "i" } },
     ];
   }
 
-  // 🎯 Apply Goal-based Filter
   const goal = await goal_model.findOne({
     studentId: req?.user?.accountId,
     goalStatus: "IN_PROGRESS",
@@ -145,12 +150,10 @@ const get_all_flash_cards_from_db = async (req: Request) => {
 
   const finalFilters = buildGoalContentFilter(goal, filters);
 
-  // 🔢 Pagination
   const pageNumber = parseInt(page, 10);
   const limitNumber = parseInt(limit, 10);
   const skip = (pageNumber - 1) * limitNumber;
 
-  // 🧾 Query DB
   const result = await FlashcardModel.find(finalFilters)
     .skip(skip)
     .limit(limitNumber)
