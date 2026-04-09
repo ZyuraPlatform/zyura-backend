@@ -78,7 +78,7 @@ export const swaggerOptions = {
             { url: "http://localhost:5000" },
           ]
         : [
-            { url: "http://localhost:5000" },
+            { url: "http://localhost:1800" },
             { url: "https://api.zyura-e.com" }
           ],
     components: {

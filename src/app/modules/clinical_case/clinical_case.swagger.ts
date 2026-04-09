@@ -133,6 +133,38 @@ export const clinicalCaseSwagger = {
       }
     }
   },
+  "/api/clinical-case/upload-bulk": {
+    post: {
+      tags: ["Clinical Case"],
+      summary:
+        "Bulk upload clinical cases from Excel (multipart: file + data JSON like MCQ bank)",
+      security: [{ bearerAuth: [] }],
+      requestBody: {
+        required: true,
+        content: {
+          "multipart/form-data": {
+            schema: {
+              type: "object",
+              required: ["file", "data"],
+              properties: {
+                file: { type: "string", format: "binary" },
+                data: {
+                  type: "string",
+                  description:
+                    "Required JSON: { subject, system, topic, contentFor, profileType, title (Clinical Case Title from step 1), optional subtopic, optional caseTitle }. Taxonomy and default case title are not read from the sheet; optional column caseTitle per row overrides title for that row.",
+                },
+              },
+            },
+          },
+        },
+      },
+      responses: {
+        201: { description: "Inserted count and any per-row errors" },
+        400: { description: "No valid rows or bad file" },
+        401: { description: "Unauthorized" },
+      },
+    },
+  },
   "/api/clinical-case": {
     get: {
       tags: ["Clinical Case"],

@@ -49,9 +49,20 @@ const delete_clinical_case_by_id = catchAsync(async (req, res) => {
     })
 })
 
+const upload_bulk_clinical_cases = catchAsync(async (req, res) => {
+    const result = await clinical_case_services.upload_bulk_clinical_cases_into_db(req)
+    manageResponse(res, {
+        statusCode: 201,
+        message: "Clinical cases uploaded",
+        success: true,
+        data: result
+    })
+})
+
 
 export const clinical_case_controllers = {
     create_new_clinical_case,
+    upload_bulk_clinical_cases,
     get_all_clinical_case,
     get_single_clinical_case,
     update_clinical_case_by_id,
