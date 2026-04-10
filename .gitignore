@@ -6,4 +6,3 @@ cli
 .github
 docker-compose.yml
 dockerfile
-package-lock.json
