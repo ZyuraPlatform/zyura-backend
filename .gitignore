@@ -3,6 +3,5 @@ node_modules
 dist
 cli
 .git
-.github
 docker-compose.yml
 dockerfile
