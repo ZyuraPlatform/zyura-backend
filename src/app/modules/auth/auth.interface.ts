@@ -35,6 +35,8 @@ export type TAccount = {
 export type TRegisterPayload = {
   email: string;
   password: string;
+  phone?: string;
+  studentType?: string;
 };
 
 export type TLoginPayload = {

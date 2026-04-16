@@ -36,9 +36,10 @@ const auth = (...roles: Role[]) => {
             if (isUserExist?.isDeleted) {
                 throw new AppError("This account is deleted", 401)
             }
-            if (!isUserExist?.isVerified) {
-                throw new AppError("This account is not verified ", 401)
-            }
+            // isVerified check temporarily disabled
+            // if (!isUserExist?.isVerified) {
+            //     throw new AppError("This account is not verified ", 401)
+            // }
             verifiedUser.profileType = isUserExist?.profile_type
             req.user = verifiedUser as JwtPayloadType;
             next();

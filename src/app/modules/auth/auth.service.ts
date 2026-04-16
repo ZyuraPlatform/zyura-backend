@@ -21,22 +21,32 @@ const register_user_into_db = async (payload: TRegisterPayload) => {
     throw new AppError("Account already exist!!", httpStatus.BAD_REQUEST);
   }
   // Generate 6-digit OTP
-  const otp = OTPMaker();
-  const otpDigits = otp.split("");
+  // const otp = OTPMaker();
+  // const otpDigits = otp.split("");
   const hashedPassword: string = bcrypt.hashSync(payload.password, 10);
 
   const accountRegistrationPayload: Partial<TAccount> = {
     email: payload?.email,
-    lastOTP: otp,
+    // lastOTP: otp,
+    isVerified: true,
     role: "STUDENT",
     profile_type: "student_profile",
     authType: "CUSTOM",
     password: hashedPassword
 
   }
-  await Account_Model.create(accountRegistrationPayload)
+  const createdAccount = await Account_Model.create(accountRegistrationPayload)
+  const createdProfile = await Student_Model.create({
+    accountId: createdAccount._id,
+    studentType: payload.studentType,
+    phone: payload.phone,
+  })
+  await Account_Model.findByIdAndUpdate(createdAccount._id, {
+    profile_id: createdProfile._id,
+  })
 
-  // Email template
+  // Email template (OTP email flow temporarily disabled)
+  /*
   const emailTemp = `
   <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="background-color:#f6f7fb; margin:0; padding:0;">
     <tr>
@@ -94,24 +104,27 @@ const register_user_into_db = async (payload: TRegisterPayload) => {
     </tr>
   </table>
   `;
+  */
 
-  await sendMail({
-    to: payload?.email,
-    textBody: `Your OTP is ${otp}`,
-    subject: "Verify your email",
-    htmlBody: emailTemp,
-  });
-  return "Please check your mailbox for the OTP"
+  // OTP email sending is temporarily disabled.
+  // await sendMail({
+  //   to: payload?.email,
+  //   textBody: `Your OTP is ${otp}`,
+  //   subject: "Verify your email",
+  //   htmlBody: emailTemp,
+  // });
+  return "Account created successfully"
 };
 
 const verified_account_into_db = async (payload: { email: string, otp: string }) => {
   const isAccountExists = await isAccountExist(payload.email)
-  if (isAccountExists.isVerified) {
-    throw new AppError('Account already verified', httpStatus.BAD_REQUEST);
-  }
-  if (isAccountExists.lastOTP !== payload.otp) {
-    throw new AppError('Invalid OTP', httpStatus.UNAUTHORIZED);
-  }
+  // OTP verification is temporarily disabled.
+  // if (isAccountExists.isVerified) {
+  //   throw new AppError('Account already verified', httpStatus.BAD_REQUEST);
+  // }
+  // if (isAccountExists.lastOTP !== payload.otp) {
+  //   throw new AppError('Invalid OTP', httpStatus.UNAUTHORIZED);
+  // }
 
   await Account_Model.findOneAndUpdate({ email: payload.email }, {
     isVerified: true,
@@ -309,17 +322,21 @@ const update_student_profile_into_db = async (req: Request) => {
 
 
 const get_my_profile_from_db = async (email: string) => {
-  const isExistAccount = await isAccountExist(email, "profile_id") as any;
-  // Convert mongoose document to plain object
-  const accountObj = isExistAccount.toObject();
+  const isExistAccount = await Account_Model.findOne({ email })
+    .populate('profile_id')
+    .lean();
+
+  if (!isExistAccount) {
+    throw new AppError("Account not found", httpStatus.NOT_FOUND);
+  }
 
   return {
     account: {
-      ...accountObj,
+      ...isExistAccount,
       password: "",
-      profile_id: accountObj.profile_id?._id,
+      profile_id: isExistAccount.profile_id?._id,
     },
-    profile: accountObj.profile_id,
+    profile: isExistAccount.profile_id,
   };
 };
 
@@ -536,13 +553,13 @@ const update_profiles_from_db = async (req: Request) => {
   // update profile
   let result;
   if (role == "STUDENT") {
-    result = await Student_Model.findOneAndUpdate({ accountId: isExistAccount._id }, payload, { new: true });
+    result = await Student_Model.findOneAndUpdate({ accountId: isExistAccount._id }, payload, { new: true, upsert: true });
   }
   if (role == "MENTOR") {
-    result = await mentor_model.findOneAndUpdate({ accountId: isExistAccount._id }, payload, { new: true });
+    result = await mentor_model.findOneAndUpdate({ accountId: isExistAccount._id }, payload, { new: true, upsert: true });
   }
   if (role == "PROFESSIONAL") {
-    result = await ProfessionalModel.findOneAndUpdate({ accountId: isExistAccount._id }, payload, { new: true });
+    result = await ProfessionalModel.findOneAndUpdate({ accountId: isExistAccount._id }, payload, { new: true, upsert: true });
   }
 
   return result;
