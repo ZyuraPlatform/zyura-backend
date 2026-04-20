@@ -38,8 +38,9 @@ const register_user_into_db = async (payload: TRegisterPayload) => {
   const createdAccount = await Account_Model.create(accountRegistrationPayload)
   const createdProfile = await Student_Model.create({
     accountId: createdAccount._id,
+    firstName: payload.firstName,
+    lastName: payload.lastName,
     studentType: payload.studentType,
-    phone: payload.phone,
   })
   await Account_Model.findByIdAndUpdate(createdAccount._id, {
     profile_id: createdProfile._id,
@@ -579,4 +580,4 @@ export const auth_services = {
   change_profile_status_from_db,
   sign_in_with_google_and_save_in_db,
   update_profiles_from_db
-}
+}  

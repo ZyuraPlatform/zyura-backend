@@ -33,6 +33,8 @@ export type TAccount = {
 };
 
 export type TRegisterPayload = {
+  firstName: string;   
+  lastName: string;  
   email: string;
   password: string;
   phone?: string;
