@@ -351,6 +351,24 @@ const verify_email_into_db = async (token: string) => {
 
   await Account_Model.updateOne({ email }, { $set: { isVerified: true, lastOTP: "" } });
 
+  // Welcome email to the user after verification (SendGrid template if configured).
+  if (configs.email.sg_welcome_template_id) {
+    try {
+      await sendMail({
+        to: email,
+        subject: "Welcome to Zyura",
+        textBody: `Welcome to Zyura, ${email}!`,
+        htmlBody: `<p>Welcome to Zyura, <b>${email}</b>!</p>`,
+        templateId: configs.email.sg_welcome_template_id,
+        dynamicTemplateData: {
+          email,
+        },
+      });
+    } catch {
+      // Don't block verification if welcome email fails.
+    }
+  }
+
   // Notify Zyura team inbox on successful verification (optional).
   if (configs.email.zyura_notify_email) {
     try {

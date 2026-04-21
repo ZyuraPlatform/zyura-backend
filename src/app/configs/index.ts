@@ -21,6 +21,7 @@ export const configs = {
         sg_api_key: process.env.SENDGRID_API_KEY,
         sg_from: process.env.SENDGRID_FROM,
         sg_verify_template_id: process.env.SENDGRID_VERIFY_TEMPLATE_ID,
+        sg_welcome_template_id: process.env.SENDGRID_WELCOME_TEMPLATE_ID,
         zyura_notify_email: process.env.ZYURA_NOTIFY_EMAIL,
     },
     cloudinary: {
