@@ -6,6 +6,7 @@ const ProfessionalSchema = new Schema<TProfessional>(
     accountId: { type: Schema.Types.ObjectId, ref: "account", required: true },
     firstName: { type: String, required: false },
     lastName: { type: String, required: false },
+    phone: { type: String, required: false },
     professionName: { type: String, required: false },
     profile_photo: { type: String, required: false },
     institution: { type: String, required: false },

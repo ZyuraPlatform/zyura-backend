@@ -4,6 +4,7 @@ export type TProfessional = {
     accountId: Types.ObjectId;
     firstName: string;
     lastName: string;
+    phone?: string;
     professionName: string;
     profile_photo: string;
     institution: string;

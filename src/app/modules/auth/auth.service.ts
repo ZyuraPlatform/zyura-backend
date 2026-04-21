@@ -10,6 +10,7 @@ import sendMail from "../../utils/mail_sender";
 import { OTPMaker } from "../../utils/otpMaker";
 import { mentor_model } from "../mentor/mentor.schema";
 import { ProfessionalModel } from "../professional/professional.schema";
+import { professional_profile_type_const_model, student_profile_type_const_model } from "../profile_type_const/profile_type_const.schema";
 import { Student_Model } from "../student/student.schema";
 import { isAccountExist } from './../../utils/isAccountExist';
 import { TAccount, TLoginPayload, TRegisterPayload, TStatus } from "./auth.interface";
@@ -71,6 +72,12 @@ const sendVerificationEmail = async (email: string) => {
   }
 };
 
+const check_email_from_db = async (email: string) => {
+  if (!email) throw new AppError("Email is required", httpStatus.BAD_REQUEST);
+  const exists = await Account_Model.exists({ email });
+  return { exists: Boolean(exists) };
+};
+
 // register user
 const register_user_into_db = async (payload: TRegisterPayload) => {
   const isExistAccount = await Account_Model.findOne({ email: payload?.email });
@@ -82,26 +89,45 @@ const register_user_into_db = async (payload: TRegisterPayload) => {
   // const otpDigits = otp.split("");
   const hashedPassword: string = bcrypt.hashSync(payload.password, 10);
 
+  const [studentType, professionalType] = await Promise.all([
+    student_profile_type_const_model.findById(payload.profileTypeId).lean(),
+    professional_profile_type_const_model.findById(payload.profileTypeId).lean(),
+  ]);
+
+  const isStudentType = Boolean(studentType);
+  const isProfessionalType = Boolean(professionalType);
+  if (!isStudentType && !isProfessionalType) {
+    throw new AppError("Invalid profile type", httpStatus.BAD_REQUEST);
+  }
+
   const accountRegistrationPayload: Partial<TAccount> = {
     email: payload?.email,
-    // lastOTP: otp,
     isVerified: false,
-    role: "STUDENT",
-    profile_type: "student_profile",
+    role: isStudentType ? "STUDENT" : "PROFESSIONAL",
+    profile_type: isStudentType ? "student_profile" : "professional_profile",
     authType: "CUSTOM",
-    password: hashedPassword
+    password: hashedPassword,
+  };
 
-  }
-  const createdAccount = await Account_Model.create(accountRegistrationPayload)
-  const createdProfile = await Student_Model.create({
-    accountId: createdAccount._id,
-    firstName: payload.firstName,
-    lastName: payload.lastName,
-    studentType: payload.studentType,
-  })
-  await Account_Model.findByIdAndUpdate(createdAccount._id, {
-    profile_id: createdProfile._id,
-  })
+  const createdAccount = await Account_Model.create(accountRegistrationPayload);
+
+  const createdProfile = isStudentType
+    ? await Student_Model.create({
+      accountId: createdAccount._id,
+      firstName: payload.firstName,
+      lastName: payload.lastName,
+      studentType: payload.profileTypeId,
+      phone: payload.phone,
+    } as any)
+    : await ProfessionalModel.create({
+      accountId: createdAccount._id,
+      firstName: payload.firstName,
+      lastName: payload.lastName,
+      phone: payload.phone,
+      professionName: payload.profileTypeId,
+    } as any);
+
+  await Account_Model.findByIdAndUpdate(createdAccount._id, { profile_id: createdProfile._id });
 
   await sendVerificationEmail(payload.email);
 
@@ -696,6 +722,7 @@ const update_profiles_from_db = async (req: Request) => {
 }
 
 export const auth_services = {
+  check_email_from_db,
   register_user_into_db,
   login_user_from_db,
   get_my_profile_from_db,

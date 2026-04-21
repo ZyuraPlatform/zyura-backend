@@ -9,6 +9,7 @@ const authRoute = Router();
 
 authRoute.post("/register", RequestValidator(auth_validation.register_validation), auth_controllers.register_user);
 authRoute.post("/login", RequestValidator(auth_validation.login_validation), auth_controllers.login_user);
+authRoute.get("/check-email", auth_controllers.check_email);
 authRoute.post("/verify-email", RequestValidator(auth_validation.verifyEmail), auth_controllers.verify_email);
 authRoute.post("/resend-verification-email", RequestValidator(auth_validation.resendVerificationEmail), auth_controllers.resend_verification_email);
 // authRoute.post("/verified-account", RequestValidator(auth_validation.verified_account), auth_controllers.verified_account);

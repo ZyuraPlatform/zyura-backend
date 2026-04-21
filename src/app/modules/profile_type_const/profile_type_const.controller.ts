@@ -22,6 +22,17 @@ const get_all_profile_type_const = catchAsync(async (req, res) => {
     meta: result?.meta
   });
 });
+
+const get_all_profile_type_const_combined = catchAsync(async (req, res) => {
+  const result = await profile_type_const_service.get_all_profile_type_const_combined_from_db(req);
+  manageResponse(res, {
+    statusCode: httpStatus.OK,
+    success: true,
+    message: "Profile types fetched successfully!",
+    data: result?.data,
+    meta: result?.meta,
+  });
+});
 const update_profile_type_const = catchAsync(async (req, res) => {
   const result = await profile_type_const_service.update_profile_type_const_into_db(req);
   manageResponse(res, {
@@ -84,6 +95,7 @@ const delete_professional_profile_type_const = catchAsync(async (req, res) => {
 export const profile_type_const_controller = {
   create_new_profile_type_const,
   get_all_profile_type_const,
+  get_all_profile_type_const_combined,
   update_profile_type_const,
   delete_profile_type_const,
 

@@ -6,7 +6,8 @@ const register_validation = z.object({
     lastName: z.string({ message: "Last name is required" }),
     email: z.string({ message: "Email is required" }).email(),
     password: z.string({ message: "Password is required" }).min(6, "Password must be at least 6 characters long"),
-    studentType: z.string({ message: "Profile type is required" }),
+    phone: z.string({ message: "Phone is required" }),
+    profileTypeId: z.string({ message: "Profile type is required" }),
 });
 
 const login_validation = z.object({

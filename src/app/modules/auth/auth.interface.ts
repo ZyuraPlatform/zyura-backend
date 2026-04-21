@@ -37,8 +37,8 @@ export type TRegisterPayload = {
   lastName: string;  
   email: string;
   password: string;
-  phone?: string;
-  studentType?: string;
+  phone: string;
+  profileTypeId: string;
 };
 
 export type TLoginPayload = {

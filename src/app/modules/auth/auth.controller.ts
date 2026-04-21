@@ -81,6 +81,17 @@ const resend_verification_email = catchAsync(async (req, res) => {
     });
 });
 
+const check_email = catchAsync(async (req, res) => {
+    const email = String(req.query.email || "").trim();
+    const result = await auth_services.check_email_from_db(email);
+    manageResponse(res, {
+        statusCode: httpStatus.OK,
+        success: true,
+        message: "Email check completed",
+        data: result,
+    });
+});
+
 const update_student_profile = catchAsync(async (req, res) => {
     const result = await auth_services.update_student_profile_into_db(req);
     manageResponse(res, {
@@ -199,6 +210,7 @@ const update_profiles = catchAsync(async (req, res) => {
 export const auth_controllers = {
     register_user,
     login_user,
+    check_email,
     verify_email,
     resend_verification_email,
     get_my_profile,

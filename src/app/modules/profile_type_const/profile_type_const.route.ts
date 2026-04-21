@@ -13,6 +13,7 @@ profile_type_const_router.post(
   profile_type_const_controller.create_new_profile_type_const
 );
 profile_type_const_router.get("/all", profile_type_const_controller.get_all_profile_type_const);
+profile_type_const_router.get("/all-combined", profile_type_const_controller.get_all_profile_type_const_combined);
 profile_type_const_router.patch("/update/:typeId", auth("ADMIN"), RequestValidator(profile_type_const_validations.create), profile_type_const_controller.update_profile_type_const);
 profile_type_const_router.delete("/delete/:typeId", auth("ADMIN"), profile_type_const_controller.delete_profile_type_const);
 

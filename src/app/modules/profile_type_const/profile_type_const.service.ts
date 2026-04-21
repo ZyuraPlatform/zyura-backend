@@ -28,6 +28,33 @@ const get_all_profile_type_const_from_db = async (req: Request) => {
   };
 }
 
+const get_all_profile_type_const_combined_from_db = async (req: Request) => {
+  const { page = 1, limit = 10000 } = req.query;
+  const skip = (Number(page) - 1) * Number(limit);
+
+  const [students, professionals] = await Promise.all([
+    student_profile_type_const_model.find().lean(),
+    professional_profile_type_const_model.find().lean(),
+  ]);
+
+  const combined = [
+    ...students.map((t) => ({ ...t, category: "STUDENT" as const })),
+    ...professionals.map((t) => ({ ...t, category: "PROFESSIONAL" as const })),
+  ].sort((a: any, b: any) => String(a.typeName).localeCompare(String(b.typeName)));
+
+  const total = combined.length;
+  const data = combined.slice(skip, skip + Number(limit));
+
+  return {
+    data,
+    meta: {
+      total,
+      page: Number(page),
+      limit: Number(limit),
+      totalPages: Math.ceil(total / Number(limit)),
+    },
+  };
+};
 
 const update_profile_type_const_into_db = async (req: Request) => {
   const typeId = req?.params?.typeId;
@@ -90,6 +117,7 @@ const delete_professional_profile_type_const_from_db = async (typeId: string) =>
 export const profile_type_const_service = {
   create_new_profile_type_const_into_db,
   get_all_profile_type_const_from_db,
+  get_all_profile_type_const_combined_from_db,
   update_profile_type_const_into_db,
   delete_profile_type_const_from_db,
 
