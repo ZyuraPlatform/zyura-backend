@@ -192,13 +192,28 @@ const update_download_count_into_db = async (noteId: string) => {
 };
 const update_note_into_db = async (req: Request) => {
   const noteId = req?.params?.noteId;
-  const body = req?.body;
-  // Handle file uploads
+  const body = (req?.body ?? {}) as any;
+
+  const existing = await notes_model.findById(noteId);
+  if (!existing) throw new AppError("Notes not found", 404);
+
+  // Determine which existing files to keep.
+  // Frontend sends `keepFileIds` for existing attachments it still wants.
+  // If not provided, we keep everything (backwards compatible).
+  const keepFileIds: string[] | undefined = Array.isArray(body.keepFileIds)
+    ? body.keepFileIds
+    : undefined;
+
+  const keptExistingNotes = keepFileIds
+    ? (existing.notes ?? []).filter((n: any) => keepFileIds.includes(n.fileId))
+    : (existing.notes ?? []);
+
+  // Upload newly attached files (if any) and append.
+  let uploadedNotes: any[] = [];
   if (req?.files && Array.isArray(req.files)) {
-    const uploadResults = await Promise.all(
+    uploadedNotes = await Promise.all(
       (req.files as Express.Multer.File[]).map(async (file) => {
         const cloudRes = await uploadCloud(file);
-
         return {
           fileType: file.mimetype,
           fileName: file.originalname,
@@ -207,14 +222,20 @@ const update_note_into_db = async (req: Request) => {
         };
       }),
     );
-
-    body.notes = uploadResults;
   }
-  const result = await notes_model.findOneAndUpdate(
-    { _id: noteId },
-    body,
-    { new: true },
-  );
+
+  // Never trust client to set `notes` directly; we compute it.
+  const { keepFileIds: _keep, notes: _notes, ...rest } = body;
+
+  const updatePayload = {
+    ...rest,
+    notes: [...keptExistingNotes, ...uploadedNotes],
+  };
+
+  const result = await notes_model.findOneAndUpdate({ _id: noteId }, updatePayload, {
+    new: true,
+  });
+
   return result;
 };
 
