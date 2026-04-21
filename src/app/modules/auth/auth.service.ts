@@ -14,6 +14,63 @@ import { Student_Model } from "../student/student.schema";
 import { isAccountExist } from './../../utils/isAccountExist';
 import { TAccount, TLoginPayload, TRegisterPayload, TStatus } from "./auth.interface";
 import { Account_Model } from "./auth.schema";
+
+const buildVerificationUrl = (email: string) => {
+  const secret = configs.jwt.verified_token as Secret;
+  if (!secret) {
+    throw new AppError("VERIFIED_TOKEN is not configured", httpStatus.INTERNAL_SERVER_ERROR);
+  }
+  if (!configs.jwt.front_end_url) {
+    throw new AppError("FRONT_END_URL is not configured", httpStatus.INTERNAL_SERVER_ERROR);
+  }
+
+  const token = jwtHelpers.generateToken({ email }, secret, "1d");
+  return `${configs.jwt.front_end_url}/verify-email?token=${encodeURIComponent(token)}`;
+};
+
+const sendVerificationEmail = async (email: string) => {
+  const verifyUrl = buildVerificationUrl(email);
+
+  const templateId = configs.email.sg_verify_template_id;
+  const usedTemplateId = templateId || "d-46ca03370b2e45a29a139b4881c23a68";
+
+  // Dynamic template variables (adjust names to match your template).
+  const dynamicTemplateData = {
+    verify_url: verifyUrl,
+    email,
+  };
+
+  const htmlBody = `
+    <div style="font-family: Arial, sans-serif; line-height: 1.5; color:#111827;">
+      <h2 style="margin:0 0 12px 0;">Verify your email</h2>
+      <p style="margin:0 0 12px 0;">Please verify your email to continue.</p>
+      <p style="margin:0 0 18px 0;">
+        <a href="${verifyUrl}" style="display:inline-block;background:#0D71CF;color:#ffffff;text-decoration:none;padding:10px 14px;border-radius:8px;">
+          Verify email
+        </a>
+      </p>
+      <p style="margin:0 0 6px 0;">If the button doesn’t work, copy and paste this link:</p>
+      <p style="margin:0; word-break:break-all;">${verifyUrl}</p>
+    </div>
+  `;
+
+  const result = await sendMail({
+    to: email,
+    subject: "Verify your email",
+    textBody: `Verify your email: ${verifyUrl}`,
+    htmlBody,
+    templateId: usedTemplateId,
+    dynamicTemplateData,
+  });
+
+  // If email sending is skipped (SMTP not configured + no SendGrid key),
+  // still surface the link in logs for dev.
+  if ((result as any)?.ok === false) {
+    // eslint-disable-next-line no-console
+    console.log("Verification link:", verifyUrl);
+  }
+};
+
 // register user
 const register_user_into_db = async (payload: TRegisterPayload) => {
   const isExistAccount = await Account_Model.findOne({ email: payload?.email });
@@ -28,7 +85,7 @@ const register_user_into_db = async (payload: TRegisterPayload) => {
   const accountRegistrationPayload: Partial<TAccount> = {
     email: payload?.email,
     // lastOTP: otp,
-    isVerified: true,
+    isVerified: false,
     role: "STUDENT",
     profile_type: "student_profile",
     authType: "CUSTOM",
@@ -45,6 +102,8 @@ const register_user_into_db = async (payload: TRegisterPayload) => {
   await Account_Model.findByIdAndUpdate(createdAccount._id, {
     profile_id: createdProfile._id,
   })
+
+  await sendVerificationEmail(payload.email);
 
   // Email template (OTP email flow temporarily disabled)
   /*
@@ -224,6 +283,12 @@ const get_new_verification_otp_from_db = async (email: string) => {
 const login_user_from_db = async (payload: TLoginPayload) => {
   // check account info 
   const isExistAccount = await isAccountExist(payload?.email)
+  if (!isExistAccount.isVerified) {
+    throw new AppError(
+      `Email is not verified. Please check ${payload?.email} for a verification link.`,
+      httpStatus.FORBIDDEN
+    );
+  }
   if (isExistAccount.accountStatus === "INACTIVE") {
     throw new AppError('Account is not active, contact us on support', httpStatus.UNAUTHORIZED);
   }
@@ -264,6 +329,52 @@ const login_user_from_db = async (payload: TLoginPayload) => {
   };
 
 }
+
+const verify_email_into_db = async (token: string) => {
+  const secret = configs.jwt.verified_token as Secret;
+  if (!secret) throw new AppError("VERIFIED_TOKEN is not configured", httpStatus.INTERNAL_SERVER_ERROR);
+
+  let decoded: any;
+  try {
+    decoded = jwtHelpers.verifyToken(token, secret);
+  } catch {
+    throw new AppError("Invalid or expired verification token", httpStatus.BAD_REQUEST);
+  }
+
+  const email = decoded?.email;
+  if (!email) throw new AppError("Invalid verification token", httpStatus.BAD_REQUEST);
+
+  const account = await Account_Model.findOne({ email });
+  if (!account) throw new AppError("Account not found", httpStatus.NOT_FOUND);
+
+  if (account.isVerified) return { verified: true };
+
+  await Account_Model.updateOne({ email }, { $set: { isVerified: true, lastOTP: "" } });
+
+  // Notify Zyura team inbox on successful verification (optional).
+  if (configs.email.zyura_notify_email) {
+    try {
+      await sendMail({
+        to: configs.email.zyura_notify_email,
+        subject: "New user verified email",
+        textBody: `A user verified their email: ${email}`,
+        htmlBody: `<p>A user verified their email: <b>${email}</b></p>`,
+      });
+    } catch {
+      // Don't block verification if notification email fails.
+    }
+  }
+  return { verified: true };
+};
+
+const resend_verification_email_from_db = async (email: string) => {
+  const account = await Account_Model.findOne({ email });
+  if (!account) throw new AppError("Account not found", httpStatus.NOT_FOUND);
+  if (account.isVerified) return { sent: false, reason: "already_verified" };
+
+  await sendVerificationEmail(email);
+  return { sent: true };
+};
 
 const update_student_profile_into_db = async (req: Request) => {
   const user = req?.user;
@@ -576,6 +687,8 @@ export const auth_services = {
   reset_password_into_db,
   verified_account_into_db,
   get_new_verification_otp_from_db,
+  verify_email_into_db,
+  resend_verification_email_from_db,
   update_student_profile_into_db,
   change_profile_status_from_db,
   sign_in_with_google_and_save_in_db,

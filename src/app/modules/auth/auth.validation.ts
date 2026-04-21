@@ -19,6 +19,14 @@ const sign_in_with_google = z.object({
     photo: z.string().optional(),
 })
 
+const verifyEmail = z.object({
+    token: z.string({ message: "Token is required" }),
+})
+
+const resendVerificationEmail = z.object({
+    email: z.string({ message: "Email is required" }).email(),
+})
+
 const changePassword = z.object({
     oldPassword: z.string({ message: "Old Password is required" }),
     newPassword: z.string({ message: "New Password is required" })
@@ -60,6 +68,8 @@ export const auth_validation = {
     resetPassword,
     verified_account,
     newVerificationOtp,
+    verifyEmail,
+    resendVerificationEmail,
     updateProfile,
     change_profile_status,
     sign_in_with_google

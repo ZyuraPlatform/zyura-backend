@@ -61,6 +61,26 @@ const login_user = catchAsync(async (req, res) => {
     });
 });
 
+const verify_email = catchAsync(async (req, res) => {
+    const result = await auth_services.verify_email_into_db(req.body.token);
+    manageResponse(res, {
+        statusCode: httpStatus.OK,
+        success: true,
+        message: "Email verified successfully!",
+        data: result,
+    });
+});
+
+const resend_verification_email = catchAsync(async (req, res) => {
+    const result = await auth_services.resend_verification_email_from_db(req.body.email);
+    manageResponse(res, {
+        statusCode: httpStatus.OK,
+        success: true,
+        message: "Verification email sent successfully!",
+        data: result,
+    });
+});
+
 const update_student_profile = catchAsync(async (req, res) => {
     const result = await auth_services.update_student_profile_into_db(req);
     manageResponse(res, {
@@ -179,6 +199,8 @@ const update_profiles = catchAsync(async (req, res) => {
 export const auth_controllers = {
     register_user,
     login_user,
+    verify_email,
+    resend_verification_email,
     get_my_profile,
     refresh_token,
     change_password,

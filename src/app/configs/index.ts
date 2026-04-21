@@ -18,7 +18,10 @@ export const configs = {
     email: {
         app_email: process.env.APP_USER,
         app_password: process.env.APP_PASSWORD,
-        sg_api_key: process.env.SENDGRID_API_KEY
+        sg_api_key: process.env.SENDGRID_API_KEY,
+        sg_from: process.env.SENDGRID_FROM,
+        sg_verify_template_id: process.env.SENDGRID_VERIFY_TEMPLATE_ID,
+        zyura_notify_email: process.env.ZYURA_NOTIFY_EMAIL,
     },
     cloudinary: {
         cloud_name: process.env.CLOUD_NAME,
