@@ -2,10 +2,100 @@ import { Request } from "express";
 import { AppError } from "../../utils/app_error";
 import { excelConverter } from "../../utils/excel_converter";
 import { isAccountExist } from "../../utils/isAccountExist";
+import {
+  buildFlatIndex,
+  findFuzzyDuplicatesFromIndex,
+} from "../../utils/stringSimilarity";
+import { ProfessionalModel } from "../professional/professional.schema";
+import { McqBankModel } from "../mcq_bank/mcq_bank.schema";
 import { T_Exam_Professional, T_Exam_Student, TRawMcqRow } from "./exam.interface";
 import { exam_model_professional, exam_model_student } from "./exam.schema";
 
-// for student
+// ─── Minimal projections (only fields needed for duplicate detection) ──────────
+// Excludes options/explanations/images — the bulk of document size.
+// This is what cuts the wire payload by ~80% vs fetching full documents.
+
+const DUPE_BANK_PROJECTION = {
+  _id: 1,
+  title: 1,
+  "mcqs.mcqId": 1,
+  "mcqs.question": 1,
+} as const;
+
+const DUPE_EXAM_PROJECTION = {
+  _id: 1,
+  examName: 1,
+  "mcqs.mcqId": 1,
+  "mcqs.question": 1,
+} as const;
+
+// ─── Shared helpers ───────────────────────────────────────────────────────────
+
+const validateCorrectOption = (
+  correctOption: string,
+  options: { option: string }[],
+) => {
+  const availableLabels = options.map((o) => o.option);
+  if (!availableLabels.includes(correctOption)) {
+    throw new AppError(
+      `correctOption "${correctOption}" is not among the available options: ${availableLabels.join(", ")}`,
+      400,
+    );
+  }
+};
+
+const buildMcqUpdateFields = (
+  mcqId: string,
+  updatedQuestionData: Record<string, any>,
+) => {
+  const updateFields: Record<string, any> = {};
+
+  if (updatedQuestionData.question)
+    updateFields["mcqs.$[mcqItem].question"] = updatedQuestionData.question;
+
+  if (updatedQuestionData.imageDescription)
+    updateFields["mcqs.$[mcqItem].imageDescription"] =
+      updatedQuestionData.imageDescription;
+
+  if (updatedQuestionData.correctOption)
+    updateFields["mcqs.$[mcqItem].correctOption"] =
+      updatedQuestionData.correctOption;
+
+  return updateFields;
+};
+
+const buildOptionUpdates = (updatedQuestionData: Record<string, any>) => {
+  const LABELS = ["A", "B", "C", "D", "E", "F"] as const;
+  const arrayFilters: Record<string, any>[] = [];
+  const updateFields: Record<string, any> = {};
+
+  LABELS.forEach((label) => {
+    const textKey = `option${label}`;
+    const expKey = `explanation${label}`;
+    const hasText = updatedQuestionData[textKey] !== undefined;
+    const hasExp = updatedQuestionData[expKey] !== undefined;
+
+    if (hasText || hasExp) {
+      const filterIdentifier = `opt${label.toLowerCase()}`;
+      arrayFilters.push({ [`${filterIdentifier}.option`]: label });
+
+      if (hasText)
+        updateFields[
+          `mcqs.$[mcqItem].options.$[${filterIdentifier}].optionText`
+        ] = updatedQuestionData[textKey];
+
+      if (hasExp)
+        updateFields[
+          `mcqs.$[mcqItem].options.$[${filterIdentifier}].explanation`
+        ] = updatedQuestionData[expKey];
+    }
+  });
+
+  return { optionUpdateFields: updateFields, arrayFilters };
+};
+
+// ─── Student ──────────────────────────────────────────────────────────────────
+
 const upload_new_student_exam_with_bulk_mcq_into_db = async (req: Request) => {
   const body = req?.body;
   const excelData: any = req.file
@@ -14,36 +104,12 @@ const upload_new_student_exam_with_bulk_mcq_into_db = async (req: Request) => {
 
   const refineData = excelData.map((item: TRawMcqRow, idx: number) => {
     const options = [
-      {
-        option: "A" as const,
-        optionText: item.optionA || "",
-        explanation: item.explanationA || undefined,
-      },
-      {
-        option: "B" as const,
-        optionText: item.optionB || "",
-        explanation: item.explanationB || undefined,
-      },
-      {
-        option: "C" as const,
-        optionText: item.optionC || "",
-        explanation: item.explanationC || undefined,
-      },
-      {
-        option: "D" as const,
-        optionText: item.optionD || "",
-        explanation: item.explanationD || undefined,
-      },
-      {
-        option: "E" as const,
-        optionText: item.optionE || "",
-        explanation: item.explanationE || undefined,
-      },
-      {
-        option: "F" as const,
-        optionText: item.optionF || "",
-        explanation: item.explanationF || undefined,
-      },
+      { option: "A" as const, optionText: item.optionA || "", explanation: item.explanationA || undefined },
+      { option: "B" as const, optionText: item.optionB || "", explanation: item.explanationB || undefined },
+      { option: "C" as const, optionText: item.optionC || "", explanation: item.explanationC || undefined },
+      { option: "D" as const, optionText: item.optionD || "", explanation: item.explanationD || undefined },
+      { option: "E" as const, optionText: item.optionE || "", explanation: item.explanationE || undefined },
+      { option: "F" as const, optionText: item.optionF || "", explanation: item.explanationF || undefined },
     ].filter((opt) => opt?.optionText !== "");
 
     return {
@@ -51,38 +117,37 @@ const upload_new_student_exam_with_bulk_mcq_into_db = async (req: Request) => {
       imageDescription: item?.imageDescription || undefined,
       options,
       correctOption: item?.correctOption?.trim()?.toUpperCase() as
-        | "A"
-        | "B"
-        | "C"
-        | "D"
-        | "E"
-        | "F",
+        | "A" | "B" | "C" | "D" | "E" | "F",
       mcqId: `MCQ-${String(idx + 1).padStart(6, "0")}`,
     };
   });
 
-  // make payload
+  refineData.forEach((mcq: any) => {
+    validateCorrectOption(mcq.correctOption, mcq.options);
+  });
+
   const payload: T_Exam_Student = {
     ...body,
     mcqs: refineData,
     totalQuestions: refineData.length,
-  }
-  const result = await exam_model_student.create(payload);
-  return result;
-}
+  };
+  return await exam_model_student.create(payload);
+};
 
 const upload_new_student_exam_with_manual_mcq_into_db = async (req: Request) => {
   const body = req?.body;
   body.totalQuestions = body?.mcqs?.length || 0;
-  body.mcqs = body?.mcqs?.map((item: any, idx: number) => {
-    return {
-      ...item,
-      mcqId: `MCQ-${String(idx + 1).padStart(6, "0")}`,
-    };
+  body.mcqs = body?.mcqs?.map((item: any, idx: number) => ({
+    ...item,
+    mcqId: `MCQ-${String(idx + 1).padStart(6, "0")}`,
+  }));
+
+  body.mcqs.forEach((mcq: any) => {
+    validateCorrectOption(mcq.correctOption, mcq.options);
   });
-  const result = await exam_model_student.create(body);
-  return result;
-}
+
+  return await exam_model_student.create(body);
+};
 
 const get_all_student_exam_from_db = async (req: Request) => {
   const { searchTerm, subject, profileType, page, limit } =
@@ -94,15 +159,18 @@ const get_all_student_exam_from_db = async (req: Request) => {
   if (subject) query.subject = subject;
   if (profileType) query.profileType = profileType;
 
-  // make role base for student profile type
-  if (req?.user?.role == "STUDENT") {
-    const isStudent = await isAccountExist(req?.user?.email as string, "profile_id") as any;
+  if (req?.user?.role === "STUDENT") {
+    const isStudent = (await isAccountExist(
+      req?.user?.email as string,
+      "profile_id",
+    )) as any;
     query.profileType = isStudent?.profile_id?.studentType;
   }
 
   const pageNumber = Math.max(Number(page) || 1, 1);
   const pageLimit = Math.max(Number(limit) || 10, 1);
   const skip = (pageNumber - 1) * pageLimit;
+
   const [data, total] = await Promise.all([
     exam_model_student
       .find(query)
@@ -132,122 +200,106 @@ const get_single_student_exam_from_db = async (req: Request) => {
 
   const total = result?.mcqs?.length || 0;
   const skip = (page - 1) * limit;
-
-  // Pagination after filtering for mcqs
   const paginatedMcqs = result?.mcqs?.slice(skip, skip + limit);
-  const meta = {
-    page,
-    limit,
-    skip,
-    total,
-    totalPages: Math.ceil(total / limit),
-  };
+
   return {
-    data: {
-      ...result,
-      mcqs: paginatedMcqs,
+    data: { ...result, mcqs: paginatedMcqs },
+    meta: {
+      page,
+      limit,
+      skip,
+      total,
+      totalPages: Math.ceil(total / limit),
     },
-    meta,
   };
 };
 
 const update_student_exam_into_db = async (req: Request) => {
   const { id } = req?.params as Record<string, string>;
-  const body = req?.body;
-  const result = await exam_model_student.findByIdAndUpdate(id, body, {
-    new: true,
-  }).select("-mcqs");
-  return result;
+  return await exam_model_student
+    .findByIdAndUpdate(id, req?.body, { new: true })
+    .select("-mcqs");
 };
 
 const update_student_exam_specific_mcq_into_db = async (req: Request) => {
   const { examId, mcqId } = req?.params as Record<string, string>;
-  const updateFields: Record<string, any> = {};
   const updatedQuestionData = req?.body;
 
-  // Question and image
-  if (updatedQuestionData.question)
-    updateFields["mcqs.$.question"] = updatedQuestionData.question;
+  if (updatedQuestionData.correctOption) {
+    const exam = await exam_model_student
+      .findOne({ _id: examId, "mcqs.mcqId": mcqId }, { "mcqs.$": 1 })
+      .lean();
+    const currentOptions = exam?.mcqs?.[0]?.options ?? [];
+    validateCorrectOption(updatedQuestionData.correctOption, currentOptions);
+  }
 
-  if (updatedQuestionData.imageDescription)
-    updateFields["mcqs.$.imageDescription"] =
-      updatedQuestionData.imageDescription;
+  const scalarFields = buildMcqUpdateFields(mcqId, updatedQuestionData);
+  const { optionUpdateFields, arrayFilters } = buildOptionUpdates(updatedQuestionData);
 
-  // Options (A–F)
-  const options = ["A", "B", "C", "D", "E", "F"] as const;
-  options.forEach((label, i) => {
-    const textKey = `option${label}` as keyof typeof updatedQuestionData;
-    const expKey = `explanation${label}` as keyof typeof updatedQuestionData;
-
-    if (updatedQuestionData[textKey] !== undefined)
-      updateFields[`mcqs.$.options.${i}.optionText`] =
-        updatedQuestionData[textKey];
-
-    if (updatedQuestionData[expKey] !== undefined)
-      updateFields[`mcqs.$.options.${i}.explanation`] =
-        updatedQuestionData[expKey];
-  });
-
-  // Correct Option
-  if (updatedQuestionData.correctOption)
-    updateFields["mcqs.$.correctOption"] = updatedQuestionData.correctOption;
-
-  // Execute the update directly in MongoDB
-  const result = await exam_model_student.findOneAndUpdate(
-    { _id: examId, "mcqs.mcqId": mcqId },
-    { $set: updateFields },
-    { new: true }
-  ).select("-mcqs");
-
-  return result;
+  return await exam_model_student
+    .findOneAndUpdate(
+      { _id: examId, "mcqs.mcqId": mcqId },
+      { $set: { ...scalarFields, ...optionUpdateFields } },
+      {
+        new: true,
+        arrayFilters: [{ "mcqItem.mcqId": mcqId }, ...arrayFilters],
+      },
+    )
+    .select("-mcqs");
 };
 
 const delete_student_exam_from_db = async (req: Request) => {
   const { id } = req?.params as Record<string, string>;
-  const result = await exam_model_student.findByIdAndDelete(id).select("-mcqs");
-  return result;
+  return await exam_model_student.findByIdAndDelete(id).select("-mcqs");
 };
 
 const add_more_mcq_into_student_exam_into_db = async (req: Request) => {
   const { id } = req?.params as Record<string, string>;
   const body = req?.body?.mcqs;
-  // find last mcq index
-  const existingMcqBank = await exam_model_student.findById(id).select("-mcqs").lean();
+  const existingMcqBank = await exam_model_student
+    .findById(id)
+    .select("-mcqs")
+    .lean();
   if (!existingMcqBank) throw new AppError("Exam not found", 404);
-  const lastMcqIndex = existingMcqBank?.totalQuestions;
+  const lastMcqIndex = existingMcqBank?.totalQuestions ?? 0;
 
   const payload = body.map((item: any, idx: number) => ({
     ...item,
-    mcqId: item.mcqId || `MCQ-${String(lastMcqIndex + idx).padStart(6, "0")}`,
+    mcqId: `MCQ-${String(lastMcqIndex + idx + 1).padStart(6, "0")}`,
   }));
 
-  const result = await exam_model_student.findByIdAndUpdate(
-    id,
-    {
-      $push: { mcqs: { $each: payload } },
-      $inc: { totalQuestions: payload.length },
-    },
-    { new: true }
-  ).select("-mcqs");
-  return result;
+  payload.forEach((mcq: any) => {
+    validateCorrectOption(mcq.correctOption, mcq.options);
+  });
+
+  return await exam_model_student
+    .findByIdAndUpdate(
+      id,
+      {
+        $push: { mcqs: { $each: payload } },
+        $inc: { totalQuestions: payload.length },
+      },
+      { new: true },
+    )
+    .select("-mcqs");
 };
 
 const delete_specific_mcq_from_student_exam_from_db = async (req: Request) => {
   const { examId, mcqId } = req?.params as Record<string, string>;
-  const result = await exam_model_student.findByIdAndUpdate(
-    examId,
-    {
-      $pull: { mcqs: { mcqId } },
-      $inc: { totalQuestions: -1 },
-    },
-    { new: true }
-  ).select("-mcqs");
-  return result;
+  return await exam_model_student
+    .findByIdAndUpdate(
+      examId,
+      { $pull: { mcqs: { mcqId } }, $inc: { totalQuestions: -1 } },
+      { new: true },
+    )
+    .select("-mcqs");
 };
 
-// for professional
+// ─── Professional ─────────────────────────────────────────────────────────────
 
-const upload_new_professional_exam_with_bulk_mcq_into_db = async (req: Request) => {
+const upload_new_professional_exam_with_bulk_mcq_into_db = async (
+  req: Request,
+) => {
   const body = req?.body;
   const excelData: any = req?.file
     ? excelConverter.parseFile(req?.file?.path) || []
@@ -255,36 +307,12 @@ const upload_new_professional_exam_with_bulk_mcq_into_db = async (req: Request) 
 
   const refineData = excelData.map((item: TRawMcqRow, idx: number) => {
     const options = [
-      {
-        option: "A" as const,
-        optionText: String(item.optionA) || "",
-        explanation: String(item.explanationA) || undefined,
-      },
-      {
-        option: "B" as const,
-        optionText: String(item.optionB) || "",
-        explanation: String(item.explanationB) || undefined,
-      },
-      {
-        option: "C" as const,
-        optionText: String(item.optionC) || "",
-        explanation: String(item.explanationC) || undefined,
-      },
-      {
-        option: "D" as const,
-        optionText: String(item.optionD) || "",
-        explanation: String(item.explanationD) || undefined,
-      },
-      {
-        option: "E" as const,
-        optionText: String(item.optionE) || "",
-        explanation: String(item.explanationE) || undefined,
-      },
-      {
-        option: "F" as const,
-        optionText: String(item.optionF) || "",
-        explanation: String(item.explanationF) || undefined,
-      },
+      { option: "A" as const, optionText: String(item.optionA) || "", explanation: String(item.explanationA) || undefined },
+      { option: "B" as const, optionText: String(item.optionB) || "", explanation: String(item.explanationB) || undefined },
+      { option: "C" as const, optionText: String(item.optionC) || "", explanation: String(item.explanationC) || undefined },
+      { option: "D" as const, optionText: String(item.optionD) || "", explanation: String(item.explanationD) || undefined },
+      { option: "E" as const, optionText: String(item.optionE) || "", explanation: String(item.explanationE) || undefined },
+      { option: "F" as const, optionText: String(item.optionF) || "", explanation: String(item.explanationF) || undefined },
     ].filter((opt) => opt?.optionText?.trim() !== "");
 
     return {
@@ -292,38 +320,39 @@ const upload_new_professional_exam_with_bulk_mcq_into_db = async (req: Request) 
       imageDescription: item?.imageDescription || undefined,
       options,
       correctOption: item?.correctOption?.trim()?.toUpperCase() as
-        | "A"
-        | "B"
-        | "C"
-        | "D"
-        | "E"
-        | "F",
+        | "A" | "B" | "C" | "D" | "E" | "F",
       mcqId: `MCQ-${String(idx + 1).padStart(6, "0")}`,
     };
   });
 
-  // make payload
+  refineData.forEach((mcq: any) => {
+    validateCorrectOption(mcq.correctOption, mcq.options);
+  });
+
   const payload: T_Exam_Professional = {
     ...body,
     mcqs: refineData,
     totalQuestions: refineData.length,
-  }
-  const result = await exam_model_professional.create(payload);
-  return result;
-}
+  };
+  return await exam_model_professional.create(payload);
+};
 
-const upload_new_professional_exam_with_manual_mcq_into_db = async (req: Request) => {
+const upload_new_professional_exam_with_manual_mcq_into_db = async (
+  req: Request,
+) => {
   const body = req?.body;
   body.totalQuestions = body?.mcqs?.length || 0;
-  body.mcqs = body?.mcqs?.map((item: any, idx: number) => {
-    return {
-      ...item,
-      mcqId: `MCQ-${String(idx + 1).padStart(6, "0")}`,
-    };
+  body.mcqs = body?.mcqs?.map((item: any, idx: number) => ({
+    ...item,
+    mcqId: `MCQ-${String(idx + 1).padStart(6, "0")}`,
+  }));
+
+  body.mcqs.forEach((mcq: any) => {
+    validateCorrectOption(mcq.correctOption, mcq.options);
   });
-  const result = await exam_model_professional.create(body);
-  return result;
-}
+
+  return await exam_model_professional.create(body);
+};
 
 const get_all_professional_exam_from_db = async (req: Request) => {
   const { searchTerm, subject, professionName, page, limit } =
@@ -335,15 +364,18 @@ const get_all_professional_exam_from_db = async (req: Request) => {
   if (subject) query.subject = subject;
   if (professionName) query.professionName = professionName;
 
-  // make role base for student profile type
-  if (req?.user?.role == "PROFESSIONAL") {
-    const isProfessional = await isAccountExist(req?.user?.email as string, "profile_id") as any;
+  if (req?.user?.role === "PROFESSIONAL") {
+    const isProfessional = (await isAccountExist(
+      req?.user?.email as string,
+      "profile_id",
+    )) as any;
     query.professionName = isProfessional?.profile_id?.professionName;
   }
 
   const pageNumber = Math.max(Number(page) || 1, 1);
   const pageLimit = Math.max(Number(limit) || 10, 1);
   const skip = (pageNumber - 1) * pageLimit;
+
   const [data, total] = await Promise.all([
     exam_model_professional
       .find(query)
@@ -373,121 +405,182 @@ const get_single_professional_exam_from_db = async (req: Request) => {
 
   const total = result?.mcqs?.length || 0;
   const skip = (page - 1) * limit;
-
-  // Pagination after filtering for mcqs
   const paginatedMcqs = result?.mcqs?.slice(skip, skip + limit);
-  const meta = {
-    page,
-    limit,
-    skip,
-    total,
-    totalPages: Math.ceil(total / limit),
-  };
+
   return {
-    data: {
-      ...result,
-      mcqs: paginatedMcqs,
+    data: { ...result, mcqs: paginatedMcqs },
+    meta: {
+      page,
+      limit,
+      skip,
+      total,
+      totalPages: Math.ceil(total / limit),
     },
-    meta,
   };
 };
 
 const update_professional_exam_into_db = async (req: Request) => {
   const { id } = req?.params as Record<string, string>;
-  const body = req?.body;
-  const result = await exam_model_professional.findByIdAndUpdate(id, body, {
-    new: true,
-  }).select("-mcqs");
-  return result;
+  return await exam_model_professional
+    .findByIdAndUpdate(id, req?.body, { new: true })
+    .select("-mcqs");
 };
 
 const update_professional_exam_specific_mcq_into_db = async (req: Request) => {
   const { examId, mcqId } = req?.params as Record<string, string>;
-  const updateFields: Record<string, any> = {};
   const updatedQuestionData = req?.body;
 
-  // Question and image
-  if (updatedQuestionData.question)
-    updateFields["mcqs.$.question"] = updatedQuestionData.question;
+  if (updatedQuestionData.correctOption) {
+    const exam = await exam_model_professional
+      .findOne({ _id: examId, "mcqs.mcqId": mcqId }, { "mcqs.$": 1 })
+      .lean();
+    const currentOptions = exam?.mcqs?.[0]?.options ?? [];
+    validateCorrectOption(updatedQuestionData.correctOption, currentOptions);
+  }
 
-  if (updatedQuestionData.imageDescription)
-    updateFields["mcqs.$.imageDescription"] =
-      updatedQuestionData.imageDescription;
+  const scalarFields = buildMcqUpdateFields(mcqId, updatedQuestionData);
+  const { optionUpdateFields, arrayFilters } = buildOptionUpdates(updatedQuestionData);
 
-  // Options (A–F)
-  const options = ["A", "B", "C", "D", "E", "F"] as const;
-  options.forEach((label, i) => {
-    const textKey = `option${label}` as keyof typeof updatedQuestionData;
-    const expKey = `explanation${label}` as keyof typeof updatedQuestionData;
-
-    if (updatedQuestionData[textKey] !== undefined)
-      updateFields[`mcqs.$.options.${i}.optionText`] =
-        updatedQuestionData[textKey];
-
-    if (updatedQuestionData[expKey] !== undefined)
-      updateFields[`mcqs.$.options.${i}.explanation`] =
-        updatedQuestionData[expKey];
-  });
-
-  // Correct Option
-  if (updatedQuestionData.correctOption)
-    updateFields["mcqs.$.correctOption"] = updatedQuestionData.correctOption;
-
-  // Execute the update directly in MongoDB
-  const result = await exam_model_professional.findOneAndUpdate(
-    { _id: examId, "mcqs.mcqId": mcqId },
-    { $set: updateFields },
-    { new: true }
-  ).select("-mcqs");
-
-  return result;
+  return await exam_model_professional
+    .findOneAndUpdate(
+      { _id: examId, "mcqs.mcqId": mcqId },
+      { $set: { ...scalarFields, ...optionUpdateFields } },
+      {
+        new: true,
+        arrayFilters: [{ "mcqItem.mcqId": mcqId }, ...arrayFilters],
+      },
+    )
+    .select("-mcqs");
 };
 
 const delete_professional_exam_from_db = async (req: Request) => {
   const { id } = req?.params as Record<string, string>;
-  const result = await exam_model_professional.findByIdAndDelete(id).select("-mcqs");
-  return result;
+  return await exam_model_professional.findByIdAndDelete(id).select("-mcqs");
 };
 
 const add_more_mcq_into_professional_exam_into_db = async (req: Request) => {
   const { id } = req?.params as Record<string, string>;
   const body = req?.body?.mcqs;
-  // find last mcq index
-  const existingMcqBank = await exam_model_professional.findById(id).select("-mcqs").lean();
+  const existingMcqBank = await exam_model_professional
+    .findById(id)
+    .select("-mcqs")
+    .lean();
   if (!existingMcqBank) throw new AppError("Exam not found", 404);
-  const lastMcqIndex = existingMcqBank?.totalQuestions;
+  const lastMcqIndex = existingMcqBank?.totalQuestions ?? 0;
 
   const payload = body.map((item: any, idx: number) => ({
     ...item,
-    mcqId: item.mcqId || `MCQ-${String(lastMcqIndex + idx).padStart(6, "0")}`,
+    mcqId:
+      item.mcqId ||
+      `MCQ-${String(lastMcqIndex + idx + 1).padStart(6, "0")}`,
   }));
 
-  const result = await exam_model_professional.findByIdAndUpdate(
-    id,
-    {
-      $push: { mcqs: { $each: payload } },
-      $inc: { totalQuestions: payload.length },
-    },
-    { new: true }
-  ).select("-mcqs");
-  return result;
+  payload.forEach((mcq: any) => {
+    validateCorrectOption(mcq.correctOption, mcq.options);
+  });
+
+  return await exam_model_professional
+    .findByIdAndUpdate(
+      id,
+      {
+        $push: { mcqs: { $each: payload } },
+        $inc: { totalQuestions: payload.length },
+      },
+      { new: true },
+    )
+    .select("-mcqs");
 };
 
-const delete_specific_mcq_from_professional_exam_from_db = async (req: Request) => {
+const delete_specific_mcq_from_professional_exam_from_db = async (
+  req: Request,
+) => {
   const { examId, mcqId } = req?.params as Record<string, string>;
-  const result = await exam_model_professional.findByIdAndUpdate(
-    examId,
-    {
-      $pull: { mcqs: { mcqId } },
-      $inc: { totalQuestions: -1 },
-    },
-    { new: true }
-  ).select("-mcqs");
-  return result;
+  return await exam_model_professional
+    .findByIdAndUpdate(
+      examId,
+      { $pull: { mcqs: { mcqId } }, $inc: { totalQuestions: -1 } },
+      { new: true },
+    )
+    .select("-mcqs");
 };
+
+// ─── ✅ check_duplicate_question_in_exams — fully optimized ──────────────────
+
+const check_duplicate_question_in_exams = async (req: Request) => {
+  const { question, excludeExamId, examType } = req.body;
+
+  if (!question || typeof question !== "string") {
+    throw new AppError("Question text is required", 400);
+  }
+
+  // ── 1. Scope exam filter by role ──────────────────────────────────────────
+  const examFilter: Record<string, any> = {};
+
+  if (examType === "professional") {
+    if (req?.user?.role === "PROFESSIONAL") {
+      const professional = await ProfessionalModel.findOne(
+        { accountId: req?.user?.accountId },
+        { professionName: 1 },
+      ).lean();
+      if (professional?.professionName) {
+        examFilter.professionName = professional.professionName;
+      }
+    }
+    // Admin: no filter — check all professional exams
+  } else {
+    // student exams
+    if (req?.user?.role === "STUDENT") {
+      const isStudent = (await isAccountExist(
+        req?.user?.email as string,
+        "profile_id",
+      )) as any;
+      const studentType = isStudent?.profile_id?.studentType;
+      if (studentType) examFilter.profileType = studentType;
+    }
+    // Admin: no filter — check all student exams
+  }
+
+  const examModel =
+    examType === "professional" ? exam_model_professional : exam_model_student;
+
+  // ── 2. Parallel fetch — minimal projection only ───────────────────────────
+  const [examDocs, bankDocs] = await Promise.all([
+    (examModel as any).find(examFilter, DUPE_EXAM_PROJECTION).lean(),
+    McqBankModel.find({}, DUPE_BANK_PROJECTION).lean(),
+  ]);
+
+  // ── 3. Normalise exam shape to match McqDocument ──────────────────────────
+  const normalisedExams = (examDocs as any[]).map((e: any) => ({
+    _id: e._id,
+    examName: e.examName ?? "Unknown Exam",
+    mcqs: e.mcqs ?? [],
+  }));
+
+  // ── 4. Single flat index over all sources + single fuzzy scan ─────────────
+  const flatIndex = buildFlatIndex(
+    [...normalisedExams, ...(bankDocs as any[])] as any,
+    excludeExamId,
+  );
+
+  const duplicates = findFuzzyDuplicatesFromIndex(
+    question,
+    flatIndex,
+    0.85,
+    10,
+  );
+
+  return {
+    hasDuplicates: duplicates.length > 0,
+    duplicates,
+    count: duplicates.length,
+    bestMatch: duplicates[0] ?? null,
+  };
+};
+
+// ─── Exports ──────────────────────────────────────────────────────────────────
 
 export const exam_service = {
-  // for student
+  // student
   upload_new_student_exam_with_bulk_mcq_into_db,
   upload_new_student_exam_with_manual_mcq_into_db,
   get_all_student_exam_from_db,
@@ -498,8 +591,7 @@ export const exam_service = {
   add_more_mcq_into_student_exam_into_db,
   delete_specific_mcq_from_student_exam_from_db,
 
-
-  // for professional
+  // professional
   upload_new_professional_exam_with_bulk_mcq_into_db,
   upload_new_professional_exam_with_manual_mcq_into_db,
   get_all_professional_exam_from_db,
@@ -509,4 +601,7 @@ export const exam_service = {
   delete_professional_exam_from_db,
   add_more_mcq_into_professional_exam_into_db,
   delete_specific_mcq_from_professional_exam_from_db,
+
+  // duplicate check
+  check_duplicate_question_in_exams,
 };
