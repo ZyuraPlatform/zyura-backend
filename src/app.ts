@@ -7,6 +7,7 @@ import globalErrorHandler from './app/middlewares/global_error_handler';
 import notFound from './app/middlewares/not_found_api';
 import appRouter from './routes';
 import { swaggerOptions } from './swaggerOptions';
+import { configs } from "./app/configs";
 const app = express()
 
 
@@ -15,18 +16,35 @@ app.use("/docs", swaggerUi.serve, swaggerUi.setup(swaggerSpec));
 
 
 // middleware
-app.use(cors({
-    origin: [
-        "http://localhost:3000",
-        "http://localhost:5173",
-        "http://testing.zyura-e.com",
-        "https://ai-student-protal.netlify.app",
-        "https://zyura-e.com",
-        "https://www.zyura-e.com"
-    ],
+const allowedOrigins = new Set<string>([
+  "http://localhost:3000",
+  "http://localhost:5173",
+  "http://testing.zyura-e.com",
+  "https://ai-student-protal.netlify.app",
+  "https://zyura-e.com",
+  "https://www.zyura-e.com",
+]);
+
+if (configs?.jwt?.front_end_url) {
+  allowedOrigins.add(configs.jwt.front_end_url);
+}
+
+app.use(
+  cors({
+    origin(origin, callback) {
+      // Allow server-to-server / curl / same-origin requests
+      if (!origin) return callback(null, true);
+
+      // Allow any localhost port for local dev (Vite can move ports)
+      if (origin.startsWith("http://localhost:")) return callback(null, true);
+
+      if (allowedOrigins.has(origin)) return callback(null, true);
+      return callback(new Error("Not allowed by CORS"));
+    },
     methods: ["GET", "POST", "PATCH", "DELETE", "PUT"],
-    credentials: true
-}))
+    credentials: true,
+  })
+);
 app.use(express.json({ limit: "100mb" }))
 app.use(express.raw())
 app.use(cookieParser())
