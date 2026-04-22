@@ -15,6 +15,7 @@ import { Student_Model } from "../student/student.schema";
 import { isAccountExist } from './../../utils/isAccountExist';
 import { TAccount, TLoginPayload, TRegisterPayload, TStatus } from "./auth.interface";
 import { Account_Model } from "./auth.schema";
+import mongoose from "mongoose";
 
 const buildVerificationUrl = (email: string) => {
   const secret = configs.jwt.verified_token as Secret;
@@ -78,6 +79,53 @@ const check_email_from_db = async (email: string) => {
   return { exists: Boolean(exists) };
 };
 
+const resolveProfileTypeNameFromId = async (profileTypeId: string) => {
+  if (!profileTypeId) return null;
+  if (!mongoose.Types.ObjectId.isValid(profileTypeId)) return null;
+
+  const [studentType, professionalType] = await Promise.all([
+    student_profile_type_const_model.findById(profileTypeId).lean(),
+    professional_profile_type_const_model.findById(profileTypeId).lean(),
+  ]);
+
+  if (studentType?.typeName) return { category: "STUDENT" as const, typeName: String(studentType.typeName) };
+  if (professionalType?.typeName) return { category: "PROFESSIONAL" as const, typeName: String(professionalType.typeName) };
+  return null;
+};
+
+/**
+ * Backward compatible fix:
+ * Some users were registered with profile type _id stored in studentType/professionName.
+ * Content filtering expects profileType to be the typeName string (e.g. "Neurology").
+ * This normalizes the stored value to typeName once, on login.
+ */
+const normalizeProfileTypeForAccount = async (accountId: string, role: string) => {
+  if (!accountId) return;
+
+  if (role === "STUDENT") {
+    const student = await Student_Model.findOne({ accountId }).select("studentType").lean();
+    const current = student?.studentType;
+    if (typeof current === "string") {
+      const resolved = await resolveProfileTypeNameFromId(current);
+      if (resolved?.category === "STUDENT") {
+        await Student_Model.updateOne({ accountId }, { $set: { studentType: resolved.typeName } });
+      }
+    }
+    return;
+  }
+
+  if (role === "PROFESSIONAL") {
+    const professional = await ProfessionalModel.findOne({ accountId }).select("professionName").lean();
+    const current = professional?.professionName;
+    if (typeof current === "string") {
+      const resolved = await resolveProfileTypeNameFromId(current);
+      if (resolved?.category === "PROFESSIONAL") {
+        await ProfessionalModel.updateOne({ accountId }, { $set: { professionName: resolved.typeName } });
+      }
+    }
+  }
+};
+
 // register user
 const register_user_into_db = async (payload: TRegisterPayload) => {
   const isExistAccount = await Account_Model.findOne({ email: payload?.email });
@@ -89,34 +137,28 @@ const register_user_into_db = async (payload: TRegisterPayload) => {
   // const otpDigits = otp.split("");
   const hashedPassword: string = bcrypt.hashSync(payload.password, 10);
 
-  const [studentType, professionalType] = await Promise.all([
-    student_profile_type_const_model.findById(payload.profileTypeId).lean(),
-    professional_profile_type_const_model.findById(payload.profileTypeId).lean(),
-  ]);
-
-  const isStudentType = Boolean(studentType);
-  const isProfessionalType = Boolean(professionalType);
-  if (!isStudentType && !isProfessionalType) {
+  const resolvedProfileType = await resolveProfileTypeNameFromId(payload.profileTypeId);
+  if (!resolvedProfileType) {
     throw new AppError("Invalid profile type", httpStatus.BAD_REQUEST);
   }
 
   const accountRegistrationPayload: Partial<TAccount> = {
     email: payload?.email,
     isVerified: false,
-    role: isStudentType ? "STUDENT" : "PROFESSIONAL",
-    profile_type: isStudentType ? "student_profile" : "professional_profile",
+    role: resolvedProfileType.category === "STUDENT" ? "STUDENT" : "PROFESSIONAL",
+    profile_type: resolvedProfileType.category === "STUDENT" ? "student_profile" : "professional_profile",
     authType: "CUSTOM",
     password: hashedPassword,
   };
 
   const createdAccount = await Account_Model.create(accountRegistrationPayload);
 
-  const createdProfile = isStudentType
+  const createdProfile = resolvedProfileType.category === "STUDENT"
     ? await Student_Model.create({
       accountId: createdAccount._id,
       firstName: payload.firstName,
       lastName: payload.lastName,
-      studentType: payload.profileTypeId,
+      studentType: resolvedProfileType.typeName,
       phone: payload.phone,
     } as any)
     : await ProfessionalModel.create({
@@ -124,7 +166,7 @@ const register_user_into_db = async (payload: TRegisterPayload) => {
       firstName: payload.firstName,
       lastName: payload.lastName,
       phone: payload.phone,
-      professionName: payload.profileTypeId,
+      professionName: resolvedProfileType.typeName,
     } as any);
 
   await Account_Model.findByIdAndUpdate(createdAccount._id, { profile_id: createdProfile._id });
@@ -321,6 +363,8 @@ const login_user_from_db = async (payload: TLoginPayload) => {
   if (isExistAccount.accountStatus === "SUSPENDED") {
     throw new AppError('Account is suspended, contact us on support', httpStatus.UNAUTHORIZED);
   }
+
+  await normalizeProfileTypeForAccount(String(isExistAccount._id), String(isExistAccount.role));
   const isPasswordMatch = await bcrypt.compare(
     payload.password,
     isExistAccount.password,
