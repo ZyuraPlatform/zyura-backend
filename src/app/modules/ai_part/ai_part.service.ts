@@ -22,46 +22,77 @@ import { notes_model } from "../notes/notes.schema";
 import { osce_model } from "../osce/osce.schema";
 import { study_planner_model } from "../study_planner/study_planner.schema";
 import { study_planner_validations } from "../study_planner/study_planner.validation";
+import { openaiChatJson, openaiChatText } from "../../utils/openai";
+import { ai_tutor_thread_model } from "./ai_tutor.schema";
 const today = new Date().toISOString().split("T")[0];
 
 const chat_with_ai_tutor_from_ai = async (req: Request) => {
   const question = req?.body?.question;
-  const payload = {
-    user_id: req?.user?.accountId,
-    question,
-    role: req?.user?.role,
-    thread_id: req?.body?.thread_id,
-  };
-  const response = await fetch((configs.ai_api as string) + "/api/v1/tutor", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
+  const accountId = String(req?.user?.accountId || "");
+  const existingThreadId = (req?.body?.thread_id as string | undefined) || undefined;
+  const threadId = existingThreadId || new (require("mongodb").ObjectId)().toString();
+
+  const thread = (await ai_tutor_thread_model.findOne({ thread_id: threadId }).lean()) ??
+    (await ai_tutor_thread_model
+      .create({
+        accountId,
+        thread_id: threadId,
+        session_title: String(question || "New chat").trim().split(/\s+/).slice(0, 6).join(" "),
+        messages: [],
+      })
+      .then((d) => d.toObject()));
+
+  const history = Array.isArray(thread?.messages) ? thread.messages.slice(-20) : [];
+  const messagesForOpenAI = [
+    {
+      role: "system" as const,
+      content:
+        "You are Zyura AI Tutor. Be concise, clinically accurate, and explain reasoning step-by-step when needed.",
     },
-    body: JSON.stringify(payload),
-  });
+    ...history.map((m) => ({
+      role: m.type === "HumanMessage" ? ("user" as const) : ("assistant" as const),
+      content: m.content,
+    })),
+    { role: "user" as const, content: String(question || "") },
+  ];
+
+  const responseText = await openaiChatText({ messages: messagesForOpenAI, temperature: 0.3 });
+
+  await ai_tutor_thread_model.updateOne(
+    { thread_id: threadId },
+    {
+      $push: {
+        messages: {
+          $each: [
+            { type: "HumanMessage", content: String(question || ""), createdAt: new Date() },
+            { type: "AIMessage", content: responseText, createdAt: new Date() },
+          ],
+        },
+      },
+    },
+    { upsert: true },
+  );
+
   await daily_ai_request_model.updateOne(
     { date: today },
     { $inc: { count: 1 } },
     { upsert: true },
   );
-  const data = await response.json();
-  return data;
+  return { thread_id: threadId, response: responseText };
 };
 
 const get_all_chat_history_from_ai = async (req: Request) => {
-  const user = req?.user;
-  const thread_id = req?.query?.thread_id;
-  const response = await fetch(
-    (configs.ai_api as string) + "/api/v1/api/chat/history",
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
+  const thread_id = String(req?.query?.thread_id || "");
+  const thread = await ai_tutor_thread_model.findOne({ thread_id }).lean();
+  const data = thread
+    ? [
+      {
+        checkpoint_id: null,
+        created_at: thread.createdAt?.toISOString?.() || new Date().toISOString(),
+        messages: thread.messages || [],
       },
-      body: JSON.stringify({ user_id: user?.accountId, thread_id }),
-    },
-  );
-  const data = await response.json();
+    ]
+    : [];
   await daily_ai_request_model.updateOne(
     { date: today },
     { $inc: { count: 1 } },
@@ -71,18 +102,13 @@ const get_all_chat_history_from_ai = async (req: Request) => {
 };
 
 const get_all_chat_thread_title_from_ai = async (req: Request) => {
-  const user = req?.user;
-  const response = await fetch(
-    (configs.ai_api as string) + "/api/v1/thread-title",
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ user_id: user?.accountId }),
-    },
-  );
-  const data = await response.json();
+  const accountId = String(req?.user?.accountId || "");
+  const threads = await ai_tutor_thread_model
+    .find({ accountId })
+    .select("thread_id session_title")
+    .sort({ updatedAt: -1 })
+    .lean();
+  const data = { threads: threads.map((t) => ({ thread_id: t.thread_id, session_title: t.session_title })) };
   await daily_ai_request_model.updateOne(
     { date: today },
     { $inc: { count: 1 } },
@@ -102,15 +128,12 @@ const generate_new_study_plan_from_ai = async (req: Request) => {
     payload.contentFor = "professional";
     payload.profileType = isAccount?.profile_id?.professionName
   }
-  const response = await fetch(configs.ai_api + "/api/v1/study_planner/", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      accept: "application/json",
-    },
-    body: JSON.stringify(payload),
+  const data = await openaiChatJson<any>({
+    system:
+      "You generate a study plan JSON. Output must match the expected schema fields: exam_name, exam_date, exam_type, daily_study_time, topics[].",
+    user: JSON.stringify(payload),
+    temperature: 0.2,
   });
-  const data = await response.json();
   const parseData = await study_planner_validations.create.parseAsync(data);
   const result = await study_planner_model.create({
     ...parseData,
@@ -127,28 +150,17 @@ const generate_new_study_plan_from_ai = async (req: Request) => {
 
 const generate_flashcard_from_ai = async (req: Request) => {
   const payload = req.body;
-  const formData = new FormData();
-  formData.append("quiz_name", payload.quiz_name);
-  formData.append("subject", payload.subject);
-  formData.append("system", payload.system);
-  formData.append("topic", payload.topic);
-  formData.append("sub_topic", payload.sub_topic);
-  formData.append("question_type", payload.question_type);
-  formData.append("question_count", payload.question_count);
-  formData.append("difficulty_level", payload.difficulty_level);
-  formData.append("user_prompt", payload.user_prompt);
+  const fileText =
+    req.file && fs.existsSync(req.file.path)
+      ? fs.readFileSync(req.file.path).toString("utf8").slice(0, 20000)
+      : "";
 
-  if (req.file) {
-    const fileBuffer = fs.readFileSync(req.file.path);
-    const blob = new Blob([fileBuffer], { type: req.file.mimetype });
-    formData.append("file", blob, req.file.originalname);
-  }
-  const response = await fetch(`${configs.ai_api}/api/v1/flash-cards`, {
-    method: "POST",
-    body: formData,
+  const data = await openaiChatJson<any[]>({
+    system:
+      "Generate flashcards as a JSON array. Each item must include frontText and backText. Return ONLY JSON array.",
+    user: JSON.stringify({ ...payload, fileText: fileText || undefined }),
+    temperature: 0.3,
   });
-
-  const data = await response.json();
   // saving payload
   const finalPayload: Partial<T_MyContent_flashcard> = {
     title: payload?.quiz_name,
@@ -198,14 +210,12 @@ const generate_mcq_from_ai = async (req: Request) => {
 
     payload.mcq_list = JSON.stringify(selectedQuestions);
   }
-  const response = await fetch((configs.ai_api as string) + "/api/v1/mcq", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(payload),
+  const data = await openaiChatJson<any>({
+    system:
+      "Generate a JSON object with key mcqs which is an array of MCQ items. Each MCQ should have question, options (A-D), correctAnswer, explanation. Return ONLY JSON.",
+    user: JSON.stringify(payload),
+    temperature: 0.3,
   });
-  const data = await response.json();
   // save it later
   const finalPayload: Partial<T_MyContent_mcq> = {
     title: payload?.quiz_name || data?.title,
@@ -239,25 +249,17 @@ const generate_mcq_from_ai = async (req: Request) => {
 
 const generate_clinical_case_from_ai = async (req: Request) => {
   const payload = req?.body;
-  // form data
-  const formData = new FormData();
-  if (payload?.prompt) {
-    formData.append("prompt", JSON.stringify(payload?.prompt));
-  }
-  if (req?.file) {
-    const fileBuffer = fs.readFileSync(req.file.path);
-    const blob = new Blob([fileBuffer], { type: req.file.mimetype });
-    formData.append("file", blob, req.file.originalname);
-  }
+  const fileText =
+    req.file && fs.existsSync(req.file.path)
+      ? fs.readFileSync(req.file.path).toString("utf8").slice(0, 20000)
+      : "";
 
-  const response = await fetch(
-    (configs.ai_api as string) + "/api/v1/api/v1/clinical-case/",
-    {
-      method: "POST",
-      body: formData,
-    },
-  );
-  const data = await response.json();
+  const data = await openaiChatJson<any>({
+    system:
+      "Generate a clinical case JSON object under key clinical_case. Include fields required by our app (caseTitle, scenario, questions/answers if applicable). Return ONLY JSON.",
+    user: JSON.stringify({ ...payload, fileText: fileText || undefined }),
+    temperature: 0.3,
+  });
   // save it later
   const finalPayload: Partial<T_MyContent_mcq> = {
     ...data?.clinical_case,
@@ -351,27 +353,17 @@ const get_all_content_title_suggestion_from_db = async (req: Request) => {
 
 const mcq_generator_from_ai = async (req: Request) => {
   const payload = req?.body;
-  // form data
-  const formData = new FormData();
+  const fileText =
+    req.file && fs.existsSync(req.file.path)
+      ? fs.readFileSync(req.file.path).toString("utf8").slice(0, 20000)
+      : "";
 
-  formData.append("prompt", JSON.stringify(payload?.prompt));
-  formData.append("d_level", JSON.stringify(payload?.d_level));
-  formData.append("q_count", JSON.stringify(payload?.q_count));
-
-  if (req?.file) {
-    const fileBuffer = fs.readFileSync(req.file.path);
-    const blob = new Blob([fileBuffer], { type: req.file.mimetype });
-    formData.append("file", blob, req.file.originalname);
-  }
-
-  const response = await fetch(
-    (configs.ai_api as string) + "/api/v1/mcq_generate",
-    {
-      method: "POST",
-      body: formData,
-    },
-  );
-  const data = await response.json();
+  const data = await openaiChatJson<any>({
+    system:
+      "Generate MCQs from the prompt/fileText. Return JSON with key mcqs as array. Each item: question, options (A-D), correctAnswer, explanation.",
+    user: JSON.stringify({ ...payload, fileText: fileText || undefined }),
+    temperature: 0.3,
+  });
   const finalPayload: Partial<T_MyContent_mcq> = {
     title: payload?.quiz_name || data?.title,
     subject: payload?.subject,
@@ -404,27 +396,17 @@ const mcq_generator_from_ai = async (req: Request) => {
 
 const generate_note_from_ai = async (req: Request) => {
   const payload = req?.body;
-  // form data
-  const formData = new FormData();
+  const fileText =
+    req.file && fs.existsSync(req.file.path)
+      ? fs.readFileSync(req.file.path).toString("utf8").slice(0, 20000)
+      : "";
 
-  formData.append("make_your_note", JSON.stringify(payload?.make_your_note));
-  formData.append("topic_name", JSON.stringify(payload?.topic_name));
-  formData.append("note_format", JSON.stringify(payload?.note_format));
-
-  if (req?.file) {
-    const fileBuffer = fs.readFileSync(req.file.path);
-    const blob = new Blob([fileBuffer], { type: req.file.mimetype });
-    formData.append("file", blob, req.file.originalname);
-  }
-
-  const response = await fetch(
-    (configs.ai_api as string) + "/api/v1/generate_notes",
-    {
-      method: "POST",
-      body: formData,
-    },
-  );
-  const data = await response.json();
+  const data = await openaiChatJson<any>({
+    system:
+      "Generate study notes. Return JSON with fields your app expects for generated notes (title/topic_name, content, note_format, etc.). Return ONLY JSON.",
+    user: JSON.stringify({ ...payload, fileText: fileText || undefined }),
+    temperature: 0.2,
+  });
   const finalPayload: Partial<T_MyContent_notes> = {
     ...data,
     studentId: req?.user?.accountId,
@@ -466,17 +448,12 @@ const generate_recommendation_from_ai = async (req: Request) => {
     exam_format: "USMLE"
   };
   payload.incorrect_answers = [...body]
-
-
-  // hit ai api
-  const res = await fetch((configs.ai_api as string) + "/api/v1/recommendation/mcq", {
-    method: "POST",
-    body: JSON.stringify(payload),
-    headers: {
-      "Content-Type": "application/json",
-    },
+  const data = await openaiChatJson<any>({
+    system:
+      "Return a JSON array of recommended content items based on incorrect answers. Each item should include at least title, subject/system/topic/subtopic when possible.",
+    user: JSON.stringify(payload),
+    temperature: 0.2,
   });
-  const data = await res.json();
   // add recommendation
   await my_content_mcq_bank_model.updateOne(
     { _id: contentId },
