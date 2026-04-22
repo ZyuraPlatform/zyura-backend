@@ -26,6 +26,64 @@ import { openaiChatJson, openaiChatText } from "../../utils/openai";
 import { ai_tutor_thread_model } from "./ai_tutor.schema";
 const today = new Date().toISOString().split("T")[0];
 
+const ensureMcqOptions = (options: any) => {
+  // Accepts: array of {option, optionText, explanation?}
+  if (Array.isArray(options)) {
+    return options
+      .filter((o) => o && typeof o === "object")
+      .map((o) => ({
+        option: String(o.option || "").trim(),
+        optionText: String(o.optionText || o.text || "").trim(),
+        explanation: o.explanation ? String(o.explanation) : undefined,
+      }))
+      .filter((o) => o.option && o.optionText);
+  }
+  // Accepts: object map {A: "...", B: "..."}
+  if (options && typeof options === "object") {
+    return Object.entries(options)
+      .map(([k, v]) => ({
+        option: String(k).trim(),
+        optionText: String(v || "").trim(),
+      }))
+      .filter((o) => o.option && o.optionText);
+  }
+  return [];
+};
+
+const normalizeMcqs = (raw: any) => {
+  const arr = Array.isArray(raw) ? raw : Array.isArray(raw?.mcqs) ? raw.mcqs : [];
+  return arr
+    .filter((m: any) => m && typeof m === "object")
+    .map((m: any, idx: number) => {
+      const options = ensureMcqOptions(m.options);
+      const correct = String(m.correctOption || m.correctAnswer || "").trim();
+      const difficulty = String(m.difficulty || m.difficultyLevel || "Basic").trim();
+      return {
+        mcqId: String(m.mcqId || `AI-${idx + 1}`),
+        difficulty: (["Basic", "Intermediate", "Advance"].includes(difficulty) ? difficulty : "Basic"),
+        question: String(m.question || "").trim(),
+        options,
+        correctOption: (["A", "B", "C", "D", "E", "F"].includes(correct) ? correct : options?.[0]?.option || "A"),
+      };
+    })
+    .filter((m: any) => m.question && Array.isArray(m.options) && m.options.length >= 2);
+};
+
+const normalizeFlashcards = (raw: any) => {
+  const arr = Array.isArray(raw) ? raw : Array.isArray(raw?.flashCards) ? raw.flashCards : [];
+  return arr
+    .filter((c: any) => c && typeof c === "object")
+    .map((c: any, idx: number) => ({
+      flashCardId: String(c.flashCardId || `FC-${idx + 1}`),
+      frontText: String(c.frontText || c.front || "").trim(),
+      backText: String(c.backText || c.back || "").trim(),
+      explanation: String(c.explanation || " ").trim() || " ",
+      difficulty: (["Basic", "Intermediate", "Advance"].includes(String(c.difficulty)) ? String(c.difficulty) : "Basic"),
+      image: c.image ? String(c.image) : undefined,
+    }))
+    .filter((c: any) => c.flashCardId && c.frontText && c.backText && c.explanation);
+};
+
 const chat_with_ai_tutor_from_ai = async (req: Request) => {
   const question = req?.body?.question;
   const accountId = String(req?.user?.accountId || "");
@@ -155,12 +213,13 @@ const generate_flashcard_from_ai = async (req: Request) => {
       ? fs.readFileSync(req.file.path).toString("utf8").slice(0, 20000)
       : "";
 
-  const data = await openaiChatJson<any[]>({
+  const data = await openaiChatJson<any>({
     system:
-      "Generate flashcards as a JSON array. Each item must include frontText and backText. Return ONLY JSON array.",
+      "Generate flashcards.\nReturn JSON: {\"flashCards\":[{flashCardId,frontText,backText,explanation,difficulty}]}.\n- difficulty must be one of: Basic, Intermediate, Advance.\nReturn ONLY JSON.",
     user: JSON.stringify({ ...payload, fileText: fileText || undefined }),
     temperature: 0.3,
   });
+  const flashCards = normalizeFlashcards(data);
   // saving payload
   const finalPayload: Partial<T_MyContent_flashcard> = {
     title: payload?.quiz_name,
@@ -168,7 +227,7 @@ const generate_flashcard_from_ai = async (req: Request) => {
     system: payload?.system,
     topic: payload?.topic,
     subtopic: payload?.sub_topic,
-    flashCards: [...data],
+    flashCards,
     studentId: req?.user?.accountId,
   };
 
@@ -212,10 +271,11 @@ const generate_mcq_from_ai = async (req: Request) => {
   }
   const data = await openaiChatJson<any>({
     system:
-      "Generate a JSON object with key mcqs which is an array of MCQ items. Each MCQ should have question, options (A-D), correctAnswer, explanation. Return ONLY JSON.",
+      "Generate MCQs.\nReturn JSON: {\"mcqs\":[{mcqId,difficulty,question,options:[{option,optionText,explanation?}],correctOption}]}\n- difficulty: Basic|Intermediate|Advance\n- correctOption: A|B|C|D|E|F\nReturn ONLY JSON.",
     user: JSON.stringify(payload),
     temperature: 0.3,
   });
+  const mcqs = normalizeMcqs(data);
   // save it later
   const finalPayload: Partial<T_MyContent_mcq> = {
     title: payload?.quiz_name || data?.title,
@@ -223,7 +283,7 @@ const generate_mcq_from_ai = async (req: Request) => {
     system: payload?.system,
     topic: payload?.topic,
     subtopic: payload?.sub_topic,
-    mcqs: data?.mcqs,
+    mcqs,
     studentId: req?.user?.accountId,
     tracking: {
       totalMcqCount: Number(payload?.question_count),
@@ -256,7 +316,7 @@ const generate_clinical_case_from_ai = async (req: Request) => {
 
   const data = await openaiChatJson<any>({
     system:
-      "Generate a clinical case JSON object under key clinical_case. Include fields required by our app (caseTitle, scenario, questions/answers if applicable). Return ONLY JSON.",
+      "Generate a clinical case.\nReturn JSON: {\"clinical_case\":{caseTitle,patientPresentation,historyOfPresentIllness,physicalExamination,laboratoryResults:[{name,value}],imaging,diagnosisQuestion:{question,diagnosisOptions:[{optionName:\"A\"|\"B\"|\"C\"|\"D\",optionValue,supportingEvidence:[],refutingEvidence:[]}]},correctOption:{optionName:\"A\"|\"B\"|\"C\"|\"D\",explanation},difficultyLevel:\"Basic\"|\"Intermediate\"|\"Advance\",mcqs:[{question,options:[{option,optionText,explanation?}],correctOption}],subject,system,topic,subtopic}}\nReturn ONLY JSON.",
     user: JSON.stringify({ ...payload, fileText: fileText || undefined }),
     temperature: 0.3,
   });
@@ -364,13 +424,14 @@ const mcq_generator_from_ai = async (req: Request) => {
     user: JSON.stringify({ ...payload, fileText: fileText || undefined }),
     temperature: 0.3,
   });
+  const mcqs = normalizeMcqs(data);
   const finalPayload: Partial<T_MyContent_mcq> = {
     title: payload?.quiz_name || data?.title,
     subject: payload?.subject,
     system: payload?.system,
     topic: payload?.topic,
     subtopic: payload?.sub_topic,
-    mcqs: [...data?.mcqs],
+    mcqs,
     studentId: req?.user?.accountId,
     tracking: {
       totalMcqCount: Number(payload?.q_count),
@@ -403,12 +464,12 @@ const generate_note_from_ai = async (req: Request) => {
 
   const data = await openaiChatJson<any>({
     system:
-      "Generate study notes. Return JSON with fields your app expects for generated notes (title/topic_name, content, note_format, etc.). Return ONLY JSON.",
+      "Generate study notes.\nReturn JSON: {\"note\":\"<string>\"}\nReturn ONLY JSON.",
     user: JSON.stringify({ ...payload, fileText: fileText || undefined }),
     temperature: 0.2,
   });
   const finalPayload: Partial<T_MyContent_notes> = {
-    ...data,
+    note: String(data?.note || data?.content || data?.text || ""),
     studentId: req?.user?.accountId,
   };
   const result = await my_content_notes_model.create(finalPayload);
