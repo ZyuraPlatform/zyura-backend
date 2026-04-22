@@ -557,6 +557,7 @@ const refresh_token_from_db = async (token: string) => {
     {
       email: userData!.email,
       role: userData!.role,
+      accountId: userData!._id,
     },
     configs.jwt.access_token as Secret,
     configs.jwt.access_expires as string,

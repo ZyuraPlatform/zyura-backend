@@ -65,6 +65,8 @@ const auth = (...roles: Role[]) => {
             //     throw new AppError("This account is not verified ", 401)
             // }
             verifiedUser.profileType = isUserExist?.profile_type
+            // Ensure downstream services always have accountId even if a token is missing it.
+            verifiedUser.accountId = verifiedUser.accountId || String(isUserExist._id)
             req.user = verifiedUser as JwtPayloadType;
             next();
         } catch (err) {

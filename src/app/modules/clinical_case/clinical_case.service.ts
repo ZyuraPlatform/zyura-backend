@@ -2,11 +2,10 @@ import { Request } from "express";
 import { AppError } from "../../utils/app_error";
 import { excelConverter } from "../../utils/excel_converter";
 import { buildGoalContentFilter } from "../../utils/findContentQueryBuilder";
+import { getNormalizedContentScopeForAccount } from "../../utils/normalizeProfileType";
 import { Account_Model } from "../auth/auth.schema";
 import { goal_model } from "../goal/goal.schema";
-import { ProfessionalModel } from "../professional/professional.schema";
 import { professional_profile_type_const_model, student_profile_type_const_model } from "../profile_type_const/profile_type_const.schema";
-import { Student_Model } from "../student/student.schema";
 import { TClinicalCase } from "./clinical_case.interface";
 import { ClinicalCaseModel } from "./clinical_case.schema";
 import { clinical_case_validations } from "./clinical_case.validation";
@@ -328,22 +327,13 @@ const get_all_clinical_case_from_db = async (req: Request) => {
   const topicTrim = trimOrEmpty(topic);
   const subtopicTrim = trimOrEmpty(subtopic);
 
-  // 🧠 Role-based filters
-  if (req?.user?.role === "STUDENT") {
-    const student = await Student_Model.findOne({
-      accountId: req?.user?.accountId,
-    });
-    filter.contentFor = "student";
-    filter.profileType = student?.studentType;
-  }
-
-  if (req?.user?.role === "PROFESSIONAL") {
-    const professional = await ProfessionalModel.findOne({
-      accountId: req?.user?.accountId,
-    });
-    filter.contentFor = "professional";
-    filter.profileType = professional?.professionName;
-  }
+  // 🧠 Role-based filters (normalized to always use typeName strings)
+  const scope = await getNormalizedContentScopeForAccount(
+    String(req?.user?.accountId || ""),
+    String(req?.user?.role || ""),
+  );
+  if (scope.contentFor) filter.contentFor = scope.contentFor;
+  if (scope.profileType) filter.profileType = scope.profileType;
 
   // 🔍 Global search
   if (searchTermTrim) {
