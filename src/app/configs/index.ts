@@ -40,6 +40,10 @@ export const configs = {
         bucket: process.env.AWS_BUCKET_NAME
     },
     ai_api: process.env.AI_API,
+    openai: {
+        api_key: process.env.OPENAI_API_KEY,
+        model: process.env.OPENAI_MODEL,
+    },
     gateway: {
         afs: {
             afs_gateway_url: process.env.AFS_GATEWAY_URL,
