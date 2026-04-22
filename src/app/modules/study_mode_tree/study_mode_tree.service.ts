@@ -10,6 +10,7 @@ import { ProfessionalModel } from "../professional/professional.schema";
 import { Student_Model } from "../student/student.schema";
 import { content_management_admin_model } from './study_mode_tree.schema';
 import { getNormalizedContentScopeForAccount } from "../../utils/normalizeProfileType";
+import { debugLog } from "../../utils/debugLog";
 
 const create_new_content_management_admin_into_db = async (req: Request) => {
   const isSubjectExist = await content_management_admin_model.findOne({ subject: req?.body?.subjectName });
@@ -32,6 +33,10 @@ const get_all_content_management_admin_from_db = async (req: Request) => {
   if (scope.contentFor) filters.contentFor = scope.contentFor;
   if (scope.profileType) filters.profileType = scope.profileType;
 
+  // #region agent log
+  debugLog({runId:'pre-fix',hypothesisId:'H3',location:'study_mode_tree.service.ts:get_all_content_management_admin_from_db',message:'Tree list scope + query',data:{role:String(req?.user?.role||''),scope,query:{contentFor,profileType}}});
+  // #endregion
+
 
   if (contentFor) {
     filters.contentFor = contentFor;
@@ -41,6 +46,10 @@ const get_all_content_management_admin_from_db = async (req: Request) => {
   }
 
   const result = await content_management_admin_model.find(filters).lean();
+
+  // #region agent log
+  debugLog({runId:'pre-fix',hypothesisId:'H3',location:'study_mode_tree.service.ts:tree_list_result',message:'Tree list result count',data:{count:Array.isArray(result)?result.length:0,filtersKeys:Object.keys(filters||{}),filters}});
+  // #endregion
 
   return result;
 };
@@ -68,6 +77,10 @@ const get_all_content_from_tree_from_db = async (req: Request) => {
   );
   if (scope.contentFor) filters.contentFor = scope.contentFor;
   if (scope.profileType) filters.profileType = scope.profileType;
+
+  // #region agent log
+  debugLog({runId:'pre-fix',hypothesisId:'H4',location:'study_mode_tree.service.ts:get_all_content_from_tree_from_db',message:'Tree content fetch scope + query',data:{key:String(key||''),role:String(req?.user?.role||''),scope,query:{subject,system,topic,subtopic,contentFor,profileType,searchTerm,page,limit}}});
+  // #endregion
 
   // other filter
   if (subject) {
@@ -129,6 +142,10 @@ const get_all_content_from_tree_from_db = async (req: Request) => {
     .select(entry.projection || "")
     .skip(skip)
     .limit(limitNum);
+
+  // #region agent log
+  debugLog({runId:'pre-fix',hypothesisId:'H4',location:'study_mode_tree.service.ts:tree_content_result',message:'Tree content fetch result',data:{key:String(key||''),total,returned:Array.isArray(data)?data.length:undefined,filtersKeys:Object.keys(filters||{}),filters}});
+  // #endregion
 
   const totalPages = Math.ceil(total / limitNum);
 

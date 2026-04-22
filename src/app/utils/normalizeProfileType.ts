@@ -2,6 +2,7 @@ import mongoose from "mongoose";
 import { professional_profile_type_const_model, student_profile_type_const_model } from "../modules/profile_type_const/profile_type_const.schema";
 import { ProfessionalModel } from "../modules/professional/professional.schema";
 import { Student_Model } from "../modules/student/student.schema";
+import { debugLog } from "./debugLog";
 
 const resolveTypeNameFromMaybeId = async (maybeId: unknown) => {
   if (typeof maybeId !== "string") return null;
@@ -28,6 +29,9 @@ const resolveTypeNameFromMaybeId = async (maybeId: unknown) => {
  * Returns the normalized { contentFor, profileType } pair.
  */
 export async function getNormalizedContentScopeForAccount(accountId: string, role: string) {
+  // #region agent log
+  debugLog({runId:'pre-fix',hypothesisId:'H2',location:'normalizeProfileType.ts:entry',message:'getNormalizedContentScopeForAccount entry',data:{hasAccountId:Boolean(accountId),role}});
+  // #endregion
   if (!accountId || !role) return { contentFor: undefined, profileType: undefined };
 
   if (role === "STUDENT") {
@@ -37,8 +41,14 @@ export async function getNormalizedContentScopeForAccount(accountId: string, rol
     const resolved = await resolveTypeNameFromMaybeId(current);
     if (resolved?.category === "STUDENT") {
       await Student_Model.updateOne({ accountId }, { $set: { studentType: resolved.typeName } });
+      // #region agent log
+      debugLog({runId:'pre-fix',hypothesisId:'H2',location:'normalizeProfileType.ts:student_resolved',message:'Resolved studentType ObjectId -> typeName',data:{resolvedTypeName:resolved.typeName}});
+      // #endregion
       return { contentFor: "student" as const, profileType: resolved.typeName };
     }
+    // #region agent log
+    debugLog({runId:'pre-fix',hypothesisId:'H2',location:'normalizeProfileType.ts:student_return',message:'Returning student scope',data:{profileType:typeof current==='string'?current:undefined,currentType:typeof current}});
+    // #endregion
     return { contentFor: "student" as const, profileType: typeof current === "string" ? current : undefined };
   }
 
@@ -49,11 +59,20 @@ export async function getNormalizedContentScopeForAccount(accountId: string, rol
     const resolved = await resolveTypeNameFromMaybeId(current);
     if (resolved?.category === "PROFESSIONAL") {
       await ProfessionalModel.updateOne({ accountId }, { $set: { professionName: resolved.typeName } });
+      // #region agent log
+      debugLog({runId:'pre-fix',hypothesisId:'H2',location:'normalizeProfileType.ts:professional_resolved',message:'Resolved professionName ObjectId -> typeName',data:{resolvedTypeName:resolved.typeName}});
+      // #endregion
       return { contentFor: "professional" as const, profileType: resolved.typeName };
     }
+    // #region agent log
+    debugLog({runId:'pre-fix',hypothesisId:'H2',location:'normalizeProfileType.ts:professional_return',message:'Returning professional scope',data:{profileType:typeof current==='string'?current:undefined,currentType:typeof current}});
+    // #endregion
     return { contentFor: "professional" as const, profileType: typeof current === "string" ? current : undefined };
   }
 
+  // #region agent log
+  debugLog({runId:'pre-fix',hypothesisId:'H2',location:'normalizeProfileType.ts:unknown_role',message:'Unknown role for scope',data:{role}});
+  // #endregion
   return { contentFor: undefined, profileType: undefined };
 }
 
