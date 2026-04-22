@@ -135,14 +135,28 @@ const get_all_notes_from_db = async (req: Request) => {
   const skip = (pageNumber - 1) * limitNumber;
 
   // 🧾 Query DB
-  const data = await notes_model
+  let data = await notes_model
     .find(finalFilters)
     .skip(skip)
     .limit(limitNumber)
     .sort({ createdAt: -1 })
     .lean();
 
-  const total = await notes_model.countDocuments(finalFilters);
+  let total = await notes_model.countDocuments(finalFilters);
+
+  const didApplyGoalFilter = Boolean(goal?.selectedSubjects?.length);
+  const didUserSpecifyFilters =
+    Boolean(subjectTrim) || Boolean(systemTrim) || Boolean(topicTrim) || Boolean(subtopicTrim) || Boolean(searchTermTrim);
+
+  if (didApplyGoalFilter && !didUserSpecifyFilters && total === 0) {
+    data = await notes_model
+      .find(filters)
+      .skip(skip)
+      .limit(limitNumber)
+      .sort({ createdAt: -1 })
+      .lean();
+    total = await notes_model.countDocuments(filters);
+  }
 
   return {
     meta: {

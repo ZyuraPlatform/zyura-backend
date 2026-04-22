@@ -213,14 +213,30 @@ const get_all_mcq_banks = async (req: Request) => {
   const skip = (pageNumber - 1) * limitNumber;
 
   // ✅ Do NOT fetch mcqs array in listing — use totalMcq counter or $size
-  const result = await McqBankModel.find(finalFilters)
+  let result = await McqBankModel.find(finalFilters)
     .select("-mcqs -__v")
     .skip(skip)
     .limit(limitNumber)
     .sort({ createdAt: -1 })
     .lean();
 
-  const total = await McqBankModel.countDocuments(finalFilters);
+  let total = await McqBankModel.countDocuments(finalFilters);
+
+  const didApplyGoalFilter = Boolean(goal?.selectedSubjects?.length);
+  const didUserSpecifyFilters =
+    Boolean(subject) || Boolean(system) || Boolean(topic) || Boolean(subtopic) || Boolean(searchTerm);
+
+  // Safe fallback: if goal filter yields nothing and user didn't explicitly filter/search,
+  // show all content for their profileType instead of a blank screen.
+  if (didApplyGoalFilter && !didUserSpecifyFilters && total === 0) {
+    result = await McqBankModel.find(filters)
+      .select("-mcqs -__v")
+      .skip(skip)
+      .limit(limitNumber)
+      .sort({ createdAt: -1 })
+      .lean();
+    total = await McqBankModel.countDocuments(filters);
+  }
 
   return {
     meta: {

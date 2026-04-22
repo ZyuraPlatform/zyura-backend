@@ -146,13 +146,26 @@ const get_all_flash_cards_from_db = async (req: Request) => {
   const limitNumber = parseInt(limit, 10);
   const skip = (pageNumber - 1) * limitNumber;
 
-  const result = await FlashcardModel.find(finalFilters)
+  let result = await FlashcardModel.find(finalFilters)
     .skip(skip)
     .limit(limitNumber)
     .sort({ createdAt: -1 })
     .lean();
 
-  const total = await FlashcardModel.countDocuments(finalFilters);
+  let total = await FlashcardModel.countDocuments(finalFilters);
+
+  const didApplyGoalFilter = Boolean(goal?.selectedSubjects?.length);
+  const didUserSpecifyFilters =
+    Boolean(subjectTrim) || Boolean(systemTrim) || Boolean(topicTrim) || Boolean(subtopicTrim) || Boolean(searchTermTrim);
+
+  if (didApplyGoalFilter && !didUserSpecifyFilters && total === 0) {
+    result = await FlashcardModel.find(filters)
+      .skip(skip)
+      .limit(limitNumber)
+      .sort({ createdAt: -1 })
+      .lean();
+    total = await FlashcardModel.countDocuments(filters);
+  }
 
   return {
     meta: {
