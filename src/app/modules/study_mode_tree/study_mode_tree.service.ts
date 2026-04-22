@@ -9,6 +9,7 @@ import { osce_model } from "../osce/osce.schema";
 import { ProfessionalModel } from "../professional/professional.schema";
 import { Student_Model } from "../student/student.schema";
 import { content_management_admin_model } from './study_mode_tree.schema';
+import { getNormalizedContentScopeForAccount } from "../../utils/normalizeProfileType";
 
 const create_new_content_management_admin_into_db = async (req: Request) => {
   const isSubjectExist = await content_management_admin_model.findOne({ subject: req?.body?.subjectName });
@@ -23,17 +24,13 @@ const get_all_content_management_admin_from_db = async (req: Request) => {
   const { contentFor, profileType } = req?.query;
 
   const filters: any = {};
-  // 🧠 Determine studentType (only for student users)
-  if (req?.user?.role === "STUDENT") {
-    const student = await Student_Model.findOne({ accountId: req?.user?.accountId });
-    filters.contentFor = "student";
-    filters.profileType = student?.studentType || undefined;
-  }
-  if (req?.user?.role === "PROFESSIONAL") {
-    const professional = await ProfessionalModel.findOne({ accountId: req?.user?.accountId });
-    filters.contentFor = "professional";
-    filters.profileType = professional?.professionName || undefined;
-  }
+  // 🧠 Determine user scope (normalized)
+  const scope = await getNormalizedContentScopeForAccount(
+    String(req?.user?.accountId || ""),
+    String(req?.user?.role || ""),
+  );
+  if (scope.contentFor) filters.contentFor = scope.contentFor;
+  if (scope.profileType) filters.profileType = scope.profileType;
 
 
   if (contentFor) {
@@ -64,17 +61,13 @@ const get_all_content_from_tree_from_db = async (req: Request) => {
 
 
   const filters: any = {};
-  // 🧠 Determine studentType (only for student users)
-  if (req?.user?.role === "STUDENT") {
-    const student = await Student_Model.findOne({ accountId: req?.user?.accountId });
-    filters.contentFor = "student";
-    filters.profileType = student?.studentType || undefined;
-  }
-  if (req?.user?.role === "PROFESSIONAL") {
-    const professional = await ProfessionalModel.findOne({ accountId: req?.user?.accountId });
-    filters.contentFor = "professional";
-    filters.profileType = professional?.professionName || undefined;
-  }
+  // 🧠 Determine user scope (normalized)
+  const scope = await getNormalizedContentScopeForAccount(
+    String(req?.user?.accountId || ""),
+    String(req?.user?.role || ""),
+  );
+  if (scope.contentFor) filters.contentFor = scope.contentFor;
+  if (scope.profileType) filters.profileType = scope.profileType;
 
   // other filter
   if (subject) {

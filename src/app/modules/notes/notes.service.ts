@@ -3,6 +3,7 @@ import { AppError } from "../../utils/app_error";
 import uploadCloud from "../../utils/cloudinary";
 import { buildGoalContentFilter } from "../../utils/findContentQueryBuilder";
 import { isAccountExist } from "../../utils/isAccountExist";
+import { getNormalizedContentScopeForAccount } from "../../utils/normalizeProfileType";
 import { goal_model } from "../goal/goal.schema";
 import { ProfessionalModel } from "../professional/professional.schema";
 import { professional_profile_type_const_model, student_profile_type_const_model } from "../profile_type_const/profile_type_const.schema";
@@ -97,22 +98,13 @@ const get_all_notes_from_db = async (req: Request) => {
   const topicTrim = trimOrEmpty(topic);
   const subtopicTrim = trimOrEmpty(subtopic);
 
-  // 🧠 Role-based filters
-  if (req?.user?.role === "STUDENT") {
-    const student = await Student_Model.findOne({
-      accountId: req?.user?.accountId,
-    });
-    filters.contentFor = "student";
-    filters.profileType = student?.studentType;
-  }
-
-  if (req?.user?.role === "PROFESSIONAL") {
-    const professional = await ProfessionalModel.findOne({
-      accountId: req?.user?.accountId,
-    });
-    filters.contentFor = "professional";
-    filters.profileType = professional?.professionName;
-  }
+  // 🧠 Role-based filters (normalized)
+  const scope = await getNormalizedContentScopeForAccount(
+    String(req?.user?.accountId || ""),
+    String(req?.user?.role || ""),
+  );
+  if (scope.contentFor) filters.contentFor = scope.contentFor;
+  if (scope.profileType) filters.profileType = scope.profileType;
 
   // 🧩 Manual filters
   if (contentForTrim) filters.contentFor = contentForTrim;

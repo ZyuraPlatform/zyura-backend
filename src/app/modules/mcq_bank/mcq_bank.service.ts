@@ -4,6 +4,7 @@ import { AppError } from "../../utils/app_error";
 import { excelConverter } from "../../utils/excel_converter";
 import { buildGoalContentFilter } from "../../utils/findContentQueryBuilder";
 import { isAccountExist } from "../../utils/isAccountExist";
+import { getNormalizedContentScopeForAccount } from "../../utils/normalizeProfileType";
 import {
   buildFlatIndex,
   findFuzzyDuplicatesFromIndex,
@@ -181,22 +182,12 @@ const get_all_mcq_banks = async (req: Request) => {
 
   const filters: any = {};
 
-
-  if (req?.user?.role === "STUDENT") {
-    const student = await Student_Model.findOne({
-      accountId: req?.user?.accountId,
-    });
-    filters.contentFor = "student";
-    filters.profileType = student?.studentType;
-  }
-
-  if (req?.user?.role === "PROFESSIONAL") {
-    const professional = await ProfessionalModel.findOne({
-      accountId: req?.user?.accountId,
-    });
-    filters.contentFor = "professional";
-    filters.profileType = professional?.professionName;
-  }
+  const scope = await getNormalizedContentScopeForAccount(
+    String(req?.user?.accountId || ""),
+    String(req?.user?.role || ""),
+  );
+  if (scope.contentFor) filters.contentFor = scope.contentFor;
+  if (scope.profileType) filters.profileType = scope.profileType;
 
 
   if (contentFor) filters.contentFor = contentFor;
@@ -271,17 +262,12 @@ const get_all_mcq_banks_public_from_db = async (req: Request) => {
   const filters: any = {};
   const trimOrEmpty = (v: unknown) => (typeof v === "string" ? v.trim() : "");
 
-  if (req?.user?.role === "STUDENT") {
-    const student = await Student_Model.findOne({ accountId: req?.user?.accountId });
-    filters.contentFor = "student";
-    filters.profileType = student?.studentType;
-  }
-
-  if (req?.user?.role === "PROFESSIONAL") {
-    const professional = await ProfessionalModel.findOne({ accountId: req?.user?.accountId });
-    filters.contentFor = "professional";
-    filters.profileType = professional?.professionName;
-  }
+  const scope = await getNormalizedContentScopeForAccount(
+    String(req?.user?.accountId || ""),
+    String(req?.user?.role || ""),
+  );
+  if (scope.contentFor) filters.contentFor = scope.contentFor;
+  if (scope.profileType) filters.profileType = scope.profileType;
 
   const contentForTrim = trimOrEmpty(contentFor);
   const subjectTrim = trimOrEmpty(subject);

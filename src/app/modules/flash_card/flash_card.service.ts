@@ -4,6 +4,7 @@ import { AppError } from "../../utils/app_error";
 import { excelConverter } from "../../utils/excel_converter";
 import { buildGoalContentFilter } from "../../utils/findContentQueryBuilder";
 import { isAccountExist } from "../../utils/isAccountExist";
+import { getNormalizedContentScopeForAccount } from "../../utils/normalizeProfileType";
 import { Account_Model } from "../auth/auth.schema";
 import { goal_model } from "../goal/goal.schema";
 import { ProfessionalModel } from "../professional/professional.schema";
@@ -113,21 +114,12 @@ const get_all_flash_cards_from_db = async (req: Request) => {
   const subtopicTrim = trimOrEmpty(subtopic);
 
 
-  if (req?.user?.role === "STUDENT") {
-    const student = await Student_Model.findOne({
-      accountId: req?.user?.accountId,
-    });
-    filters.contentFor = "student";
-    filters.profileType = student?.studentType;
-  }
-
-  if (req?.user?.role === "PROFESSIONAL") {
-    const professional = await ProfessionalModel.findOne({
-      accountId: req?.user?.accountId,
-    });
-    filters.contentFor = "professional";
-    filters.profileType = professional?.professionName;
-  }
+  const scope = await getNormalizedContentScopeForAccount(
+    String(req?.user?.accountId || ""),
+    String(req?.user?.role || ""),
+  );
+  if (scope.contentFor) filters.contentFor = scope.contentFor;
+  if (scope.profileType) filters.profileType = scope.profileType;
 
   if (contentForTrim) filters.contentFor = contentForTrim;
   if (subjectTrim) filters.subject = subjectTrim;
