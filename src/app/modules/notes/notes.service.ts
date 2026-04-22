@@ -158,17 +158,17 @@ const get_all_notes_from_db = async (req: Request) => {
     total = await notes_model.countDocuments(filters);
   }
 
-  if (!didUserSpecifyFilters && total === 0 && filters?.contentFor && filters?.profileType) {
-    const fallbackFilters = { ...filters };
-    delete fallbackFilters.profileType;
-    data = await notes_model
-      .find(fallbackFilters)
-      .skip(skip)
-      .limit(limitNumber)
-      .sort({ createdAt: -1 })
-      .lean();
-    total = await notes_model.countDocuments(fallbackFilters);
-  }
+  // if (!didUserSpecifyFilters && total === 0 && filters?.contentFor && filters?.profileType) {
+  //   const fallbackFilters = { ...filters };
+  //   delete fallbackFilters.profileType;
+  //   data = await notes_model
+  //     .find(fallbackFilters)
+  //     .skip(skip)
+  //     .limit(limitNumber)
+  //     .sort({ createdAt: -1 })
+  //     .lean();
+  //   total = await notes_model.countDocuments(fallbackFilters);
+  // }
 
   return {
     meta: {

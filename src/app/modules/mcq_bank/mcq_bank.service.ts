@@ -239,17 +239,17 @@ const get_all_mcq_banks = async (req: Request) => {
   }
 
   // Safe fallback: if profileType filter yields nothing, show all content for the role's contentFor.
-  if (!didUserSpecifyFilters && total === 0 && filters?.contentFor && filters?.profileType) {
-    const fallbackFilters = { ...filters };
-    delete fallbackFilters.profileType;
-    result = await McqBankModel.find(fallbackFilters)
-      .select("-mcqs -__v")
-      .skip(skip)
-      .limit(limitNumber)
-      .sort({ createdAt: -1 })
-      .lean();
-    total = await McqBankModel.countDocuments(fallbackFilters);
-  }
+  // if (!didUserSpecifyFilters && total === 0 && filters?.contentFor && filters?.profileType) {
+  //   const fallbackFilters = { ...filters };
+  //   delete fallbackFilters.profileType;
+  //   result = await McqBankModel.find(fallbackFilters)
+  //     .select("-mcqs -__v")
+  //     .skip(skip)
+  //     .limit(limitNumber)
+  //     .sort({ createdAt: -1 })
+  //     .lean();
+  //   total = await McqBankModel.countDocuments(fallbackFilters);
+  // }
 
   return {
     meta: {

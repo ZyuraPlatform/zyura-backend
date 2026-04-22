@@ -167,16 +167,16 @@ const get_all_flash_cards_from_db = async (req: Request) => {
     total = await FlashcardModel.countDocuments(filters);
   }
 
-  if (!didUserSpecifyFilters && total === 0 && filters?.contentFor && filters?.profileType) {
-    const fallbackFilters = { ...filters };
-    delete fallbackFilters.profileType;
-    result = await FlashcardModel.find(fallbackFilters)
-      .skip(skip)
-      .limit(limitNumber)
-      .sort({ createdAt: -1 })
-      .lean();
-    total = await FlashcardModel.countDocuments(fallbackFilters);
-  }
+  // // if (!didUserSpecifyFilters && total === 0 && filters?.contentFor && filters?.profileType) {
+  //   const fallbackFilters = { ...filters };
+  //   delete fallbackFilters.profileType;
+  //   result = await FlashcardModel.find(fallbackFilters)
+  //     .skip(skip)
+  //     .limit(limitNumber)
+  //     .sort({ createdAt: -1 })
+  //     .lean();
+  //   total = await FlashcardModel.countDocuments(fallbackFilters);
+  // }
 
   return {
     meta: {
