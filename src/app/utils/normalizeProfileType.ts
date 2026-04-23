@@ -56,23 +56,31 @@ export async function getNormalizedContentScopeForAccount(accountId: string, rol
     const professional = await ProfessionalModel.findOne({ accountId }).select("professionName").lean();
     const current = professional?.professionName;
 
+    // If it's an ObjectId string, resolve to typeName in memory (no DB overwrite)
     const resolved = await resolveTypeNameFromMaybeId(current);
     if (resolved?.category === "PROFESSIONAL") {
-      await ProfessionalModel.updateOne({ accountId }, { $set: { professionName: resolved.typeName } });
       // #region agent log
       debugLog({runId:'pre-fix',hypothesisId:'H2',location:'normalizeProfileType.ts:professional_resolved',message:'Resolved professionName ObjectId -> typeName',data:{resolvedTypeName:resolved.typeName}});
       // #endregion
       return { contentFor: "professional" as const, profileType: resolved.typeName };
     }
-    // #region agent log
-    debugLog({runId:'pre-fix',hypothesisId:'H2',location:'normalizeProfileType.ts:professional_return',message:'Returning professional scope',data:{profileType:typeof current==='string'?current:undefined,currentType:typeof current}});
-    // #endregion
-    return { contentFor: "professional" as const, profileType: typeof current === "string" ? current : undefined };
+
+    // If it's already a typeName string, verify it exists in professional_profile_type_const
+    if (typeof current === "string" && current.trim() !== "") {
+      const profType = await professional_profile_type_const_model
+        .findOne({ typeName: current.trim() })  // ← lookup by typeName directly
+        .lean();
+      // #region agent log
+      debugLog({runId:'pre-fix',hypothesisId:'H2',location:'normalizeProfileType.ts:professional_return',message:'Returning professional scope',data:{profileType: profType?.typeName ?? current, currentType:typeof current}});
+      // #endregion
+      return { contentFor: "professional" as const, profileType: profType?.typeName ? String(profType.typeName) : current };
+    }
+
+    return { contentFor: "professional" as const, profileType: undefined };
   }
 
   // #region agent log
   debugLog({runId:'pre-fix',hypothesisId:'H2',location:'normalizeProfileType.ts:unknown_role',message:'Unknown role for scope',data:{role}});
   // #endregion
   return { contentFor: undefined, profileType: undefined };
-}
-
+} 
