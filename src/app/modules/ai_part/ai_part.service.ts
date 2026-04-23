@@ -26,6 +26,129 @@ import { openaiChatJson, openaiChatText } from "../../utils/openai";
 import { ai_tutor_thread_model } from "./ai_tutor.schema";
 const today = new Date().toISOString().split("T")[0];
 
+type TutorCategory = "medical_exam" | "platform_help" | "other";
+
+const outOfScopeReply =
+  "I’m here to help with medical exam prep and Zyura platform questions. Please share your exam/topic (e.g., cardiology, pharmacology, OSCE, MCQs, study plan) and I’ll help.";
+
+const normalizeText = (v: unknown) =>
+  String(v ?? "")
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim();
+
+const looksMedicalExamRelated = (q: string) => {
+  const s = normalizeText(q);
+  if (!s) return false;
+  const keywords = [
+    "symptom",
+    "sign",
+    "diagnos",
+    "differential",
+    "treat",
+    "management",
+    "drug",
+    "dose",
+    "contraindication",
+    "side effect",
+    "pathophysiolog",
+    "anatomy",
+    "physiology",
+    "pharmacology",
+    "microbiology",
+    "immunology",
+    "histology",
+    "biochem",
+    "ecg",
+    "x-ray",
+    "ct",
+    "mri",
+    "lab value",
+    "osce",
+    "mcq",
+    "nbme",
+    "usmle",
+    "plab",
+    "mrcp",
+    "neet",
+    "fmge",
+    "step 1",
+    "step 2",
+    "step 3",
+  ];
+  return keywords.some((k) => s.includes(k));
+};
+
+const looksPlatformHelpRelated = (q: string) => {
+  const s = normalizeText(q);
+  if (!s) return false;
+  const keywords = [
+    "zyura",
+    "flashcard",
+    "flash card",
+    "mcq bank",
+    "quiz",
+    "study plan",
+    "notes",
+    "clinical case",
+    "tutor",
+    "thread",
+    "history",
+    "upload",
+    "dashboard",
+  ];
+  return keywords.some((k) => s.includes(k));
+};
+
+const parseTutorCategory = (v: unknown): TutorCategory | null => {
+  if (v === "medical_exam" || v === "platform_help" || v === "other") return v;
+  return null;
+};
+
+const classifyTutorQuestion = async (question: string): Promise<{
+  category: TutorCategory;
+  inDomain: boolean;
+  reasonShort?: string;
+}> => {
+  if (looksPlatformHelpRelated(question)) {
+    return { category: "platform_help", inDomain: true, reasonShort: "keyword_platform" };
+  }
+  if (looksMedicalExamRelated(question)) {
+    return { category: "medical_exam", inDomain: true, reasonShort: "keyword_medical" };
+  }
+
+  try {
+    const result = await openaiChatJson<any>({
+      system: [
+        "You are a strict classifier for Zyura AI Tutor.",
+        "Decide whether the user question is in scope.",
+        "In-scope categories:",
+        '- medical_exam: medicine/clinical science, exam prep, MCQs, OSCE, diagnostics, treatments, study strategy for medical exams.',
+        '- platform_help: questions about using Zyura features (flashcards, MCQ bank, study plan, notes, uploads, dashboard).',
+        "Out-of-scope category:",
+        "- other: general trivia, holidays, celebrities, politics, unrelated tech, etc.",
+        "",
+        'Return ONLY valid JSON exactly matching: {"category":"medical_exam|platform_help|other","inDomain":true|false,"reasonShort":"..."}',
+        "",
+        "Examples:",
+        'Q: "When is Diwali?" -> {"category":"other","inDomain":false,"reasonShort":"holiday_trivia"}',
+        'Q: "Explain sensitivity vs specificity with an example" -> {"category":"medical_exam","inDomain":true,"reasonShort":"exam_concept"}',
+        'Q: "How do I generate flashcards on Zyura?" -> {"category":"platform_help","inDomain":true,"reasonShort":"zyura_feature"}',
+      ].join("\n"),
+      user: JSON.stringify({ question }),
+      temperature: 0,
+    });
+
+    const category = parseTutorCategory(result?.category) ?? "other";
+    const inDomain = Boolean(result?.inDomain) && category !== "other";
+    const reasonShort = typeof result?.reasonShort === "string" ? result.reasonShort.slice(0, 80) : undefined;
+    return { category, inDomain, reasonShort };
+  } catch {
+    // Fail-safe: do not answer off-topic if classifier fails.
+    return { category: "other", inDomain: false, reasonShort: "classifier_failed" };
+  }
+};
+
 const ensureMcqOptions = (options: any) => {
   // Accepts: array of {option, optionText, explanation?}
   if (Array.isArray(options)) {
@@ -101,17 +224,52 @@ const chat_with_ai_tutor_from_ai = async (req: Request) => {
       .then((d) => d.toObject()));
 
   const history = Array.isArray(thread?.messages) ? thread.messages.slice(-20) : [];
+
+  const qText = String(question || "");
+  const classification = await classifyTutorQuestion(qText);
+  if (!classification.inDomain) {
+    const responseText = outOfScopeReply;
+
+    await ai_tutor_thread_model.updateOne(
+      { thread_id: threadId },
+      {
+        $push: {
+          messages: {
+            $each: [
+              { type: "HumanMessage", content: qText, createdAt: new Date() },
+              { type: "AIMessage", content: responseText, createdAt: new Date() },
+            ],
+          },
+        },
+      },
+      { upsert: true },
+    );
+
+    await daily_ai_request_model.updateOne(
+      { date: today },
+      { $inc: { count: 1 } },
+      { upsert: true },
+    );
+
+    return { thread_id: threadId, response: responseText };
+  }
+
   const messagesForOpenAI = [
     {
       role: "system" as const,
       content:
-        "You are Zyura AI Tutor. Be concise, clinically accurate, and explain reasoning step-by-step when needed.",
+        [
+          "You are Zyura AI Tutor.",
+          "Scope: medical exam prep (medicine/clinical science/OSCE/MCQs/study strategy) and Zyura platform help.",
+          "If the user asks anything outside this scope, do NOT answer it; politely redirect them back to medical exam prep or Zyura usage questions.",
+          "Be concise, clinically accurate, and explain reasoning step-by-step when needed.",
+        ].join("\n"),
     },
     ...history.map((m) => ({
       role: m.type === "HumanMessage" ? ("user" as const) : ("assistant" as const),
       content: m.content,
     })),
-    { role: "user" as const, content: String(question || "") },
+    { role: "user" as const, content: qText },
   ];
 
   const responseText = await openaiChatText({ messages: messagesForOpenAI, temperature: 0.3 });
@@ -271,11 +429,72 @@ const generate_mcq_from_ai = async (req: Request) => {
   }
   const data = await openaiChatJson<any>({
     system:
-      "Generate MCQs.\nReturn JSON: {\"mcqs\":[{mcqId,difficulty,question,options:[{option,optionText,explanation?}],correctOption}]}\n- difficulty: Basic|Intermediate|Advance\n- correctOption: A|B|C|D|E|F\nReturn ONLY JSON.",
+      [
+        "Generate MCQs.",
+        "Return ONLY valid JSON: {\"mcqs\":[{mcqId,difficulty,question,options:[{option,optionText,explanation}],correctOption}]}",
+        "- difficulty: Basic|Intermediate|Advance",
+        "- correctOption: A|B|C|D|E|F",
+        "- For EACH option provide a short explanation (1–2 sentences) why it is correct/incorrect.",
+      ].join("\n"),
     user: JSON.stringify(payload),
     temperature: 0.3,
   });
   const mcqs = normalizeMcqs(data);
+  // Guarantee at least the correct option has an explanation (fallback fill).
+  try {
+    const missing = mcqs
+      .map((m: any, idx: number) => {
+        const correct = String(m?.correctOption ?? "").trim();
+        const opts = Array.isArray(m?.options) ? m.options : [];
+        const correctOpt = opts.find((o: any) => String(o?.option ?? "").trim() === correct);
+        const explanation = String(correctOpt?.explanation ?? "").trim();
+        return explanation
+          ? null
+          : {
+              key: String(m?.mcqId ?? "").trim() || `idx:${idx}`,
+              question: String(m?.question ?? ""),
+              correctOption: correct,
+              optionText: String(correctOpt?.optionText ?? ""),
+            };
+      })
+      .filter(Boolean);
+
+    if (missing.length) {
+      const fill = await openaiChatJson<any>({
+        system: [
+          "Fill in missing explanations for the correct option only.",
+          "Return ONLY JSON: {\"items\":[{\"key\":\"...\",\"correctExplanation\":\"...\"}]}",
+          "Rules: 1-3 sentences, clinically accurate, no extra keys.",
+        ].join("\n"),
+        user: JSON.stringify({ items: missing }),
+        temperature: 0,
+      });
+
+      const map = new Map<string, string>();
+      if (Array.isArray(fill?.items)) {
+        for (const it of fill.items) {
+          const k = String(it?.key ?? "").trim();
+          const expl = String(it?.correctExplanation ?? "").trim();
+          if (k && expl) map.set(k, expl);
+        }
+      }
+
+      for (let idx = 0; idx < mcqs.length; idx++) {
+        const m: any = mcqs[idx];
+        const key = String(m?.mcqId ?? "").trim() || `idx:${idx}`;
+        const add = map.get(key);
+        if (!add) continue;
+        const correct = String(m?.correctOption ?? "").trim();
+        if (!Array.isArray(m?.options)) continue;
+        const correctOpt = m.options.find((o: any) => String(o?.option ?? "").trim() === correct);
+        if (correctOpt && !String(correctOpt?.explanation ?? "").trim()) {
+          correctOpt.explanation = add;
+        }
+      }
+    }
+  } catch {
+    // best-effort only
+  }
   // save it later
   const finalPayload: Partial<T_MyContent_mcq> = {
     title: payload?.quiz_name || data?.title,
@@ -420,7 +639,14 @@ const mcq_generator_from_ai = async (req: Request) => {
 
   const data = await openaiChatJson<any>({
     system:
-      "Generate MCQs from the prompt/fileText. Return JSON with key mcqs as array. Each item: question, options (A-D), correctAnswer, explanation.",
+      [
+        "Generate MCQs from the prompt/fileText.",
+        "Return ONLY valid JSON: {\"mcqs\":[{mcqId,difficulty,question,options:[{option,optionText,explanation}],correctOption}]}",
+        "- options must be labeled A-D (or A-F if needed).",
+        "- difficulty: Basic|Intermediate|Advance",
+        "- correctOption: A|B|C|D|E|F",
+        "- For EACH option provide a short explanation (1–2 sentences) why it is correct/incorrect.",
+      ].join("\n"),
     user: JSON.stringify({ ...payload, fileText: fileText || undefined }),
     temperature: 0.3,
   });
@@ -508,17 +734,162 @@ const generate_recommendation_from_ai = async (req: Request) => {
     ...roleMeta,
     exam_format: "USMLE"
   };
-  payload.incorrect_answers = [...body]
+  payload.incorrect_answers = Array.isArray(body) ? body : [];
   const data = await openaiChatJson<any>({
     system:
-      "Return a JSON array of recommended content items based on incorrect answers. Each item should include at least title, subject/system/topic/subtopic when possible.",
+      [
+        "You generate AI Study Recommendations for a medical exam prep platform.",
+        "Given the quiz metadata and the user's incorrect answers, return ONLY a single JSON object with this shape:",
+        "{",
+        '  "post_quiz_recommendations": {',
+        '    "weak_area_level": "<string>",',
+        '    "weak_area_name": "<string>",',
+        '    "why_this_is_commonly_missed": "<string>",',
+        '    "what_to_review": "<string>",',
+        '    "how_to_practice": "<string>",',
+        '    "suggested_references": "<string>",',
+        '    "mcqs": [ { "mcqId": "<string>", "difficulty": "Basic|Intermediate|Advance", "question": "<string>", "options": [ { "option": "A|B|C|D|E|F", "optionText": "<string>", "explanation": "<string>" } ], "correctOption": "A|B|C|D|E|F" } ]',
+        "  },",
+        '  "clinical_case": <object|null>,',
+        '  "flashcards": { "flashcards": [ { "flashCardId": "<string>", "frontText": "<string>", "backText": "<string>", "explanation": "<string>", "difficulty": "Basic|Intermediate|Advance" } ] } | null,',
+        '  "notes": { "title": "<string>", "note": "<string>" } | null',
+        "}",
+        "",
+        "Rules:",
+        "- If you cannot produce a section, set it to null (do not omit keys).",
+        "- MCQs must be clinically accurate and aligned with the weak area.",
+        "- For each MCQ option, provide a short explanation (1–2 sentences) for why it is correct/incorrect.",
+        "- Keep outputs concise but useful.",
+      ].join("\n"),
     user: JSON.stringify(payload),
     temperature: 0.2,
   });
+  const normalizedData =
+    data && typeof data === "object" && !Array.isArray(data)
+      ? {
+          post_quiz_recommendations: data.post_quiz_recommendations ?? null,
+          clinical_case: data.clinical_case ?? null,
+          flashcards: data.flashcards ?? null,
+          notes: data.notes ?? null,
+        }
+      : {
+          post_quiz_recommendations: null,
+          clinical_case: null,
+          flashcards: null,
+          notes: null,
+        };
+
+  // Ensure at least the correct option has an explanation for each recommended MCQ.
+  try {
+    const mcqs = normalizedData?.post_quiz_recommendations?.mcqs;
+    if (Array.isArray(mcqs) && mcqs.length) {
+      const missing = mcqs
+        .map((m: any, idx: number) => {
+          const correct = String(m?.correctOption ?? "").trim();
+          const opts = Array.isArray(m?.options) ? m.options : [];
+          const correctOpt = opts.find((o: any) => String(o?.option ?? "").trim() === correct);
+          const explanation = String(correctOpt?.explanation ?? "").trim();
+          return explanation
+            ? null
+            : {
+                key: String(m?.mcqId ?? "").trim() || `idx:${idx}`,
+                question: String(m?.question ?? ""),
+                correctOption: correct,
+                optionText: String(correctOpt?.optionText ?? ""),
+              };
+        })
+        .filter(Boolean);
+
+      if (missing.length) {
+        const fill = await openaiChatJson<any>({
+          system: [
+            "Fill in missing explanations for the correct option only.",
+            "Return ONLY JSON: {\"items\":[{\"key\":\"...\",\"correctExplanation\":\"...\"}]}",
+            "Rules: 1-3 sentences, clinically accurate, no extra keys.",
+          ].join("\n"),
+          user: JSON.stringify({ items: missing }),
+          temperature: 0,
+        });
+
+        const map = new Map<string, string>();
+        if (Array.isArray(fill?.items)) {
+          for (const it of fill.items) {
+            const id = String(it?.key ?? "").trim();
+            const expl = String(it?.correctExplanation ?? "").trim();
+            if (id && expl) map.set(id, expl);
+          }
+        }
+
+        for (let idx = 0; idx < mcqs.length; idx++) {
+          const m = mcqs[idx];
+          const key = String(m?.mcqId ?? "").trim() || `idx:${idx}`;
+          const add = map.get(key);
+          if (!add) continue;
+          const correct = String(m?.correctOption ?? "").trim();
+          if (!Array.isArray(m?.options)) continue;
+          const correctOpt = m.options.find((o: any) => String(o?.option ?? "").trim() === correct);
+          if (correctOpt && !String(correctOpt?.explanation ?? "").trim()) {
+            correctOpt.explanation = add;
+          }
+        }
+
+        // Final fallback: if still missing, generate from question + correct choice text.
+        const stillMissing = mcqs
+          .map((m: any, idx: number) => {
+            const correct = String(m?.correctOption ?? "").trim();
+            const opts = Array.isArray(m?.options) ? m.options : [];
+            const correctOpt = opts.find((o: any) => String(o?.option ?? "").trim() === correct);
+            const explanation = String(correctOpt?.explanation ?? "").trim();
+            return explanation
+              ? null
+              : {
+                  idx,
+                  question: String(m?.question ?? ""),
+                  correctOption: correct,
+                  optionText: String(correctOpt?.optionText ?? ""),
+                };
+          })
+          .filter(Boolean);
+
+        if (stillMissing.length) {
+          const fill2 = await openaiChatJson<any>({
+            system: [
+              "Write correct-answer explanations for MCQs.",
+              "Return ONLY JSON: {\"items\":[{\"idx\":0,\"correctExplanation\":\"...\"}]}",
+              "Rules: 1-3 sentences, clinically accurate, based only on the provided question + correct option text.",
+            ].join("\n"),
+            user: JSON.stringify({ items: stillMissing }),
+            temperature: 0,
+          });
+
+          const map2 = new Map<number, string>();
+          if (Array.isArray(fill2?.items)) {
+            for (const it of fill2.items) {
+              const idx = Number(it?.idx);
+              const expl = String(it?.correctExplanation ?? "").trim();
+              if (Number.isFinite(idx) && expl) map2.set(idx, expl);
+            }
+          }
+
+          for (const [idx, expl] of map2.entries()) {
+            const m = mcqs[idx];
+            const correct = String(m?.correctOption ?? "").trim();
+            if (!Array.isArray(m?.options)) continue;
+            const correctOpt = m.options.find((o: any) => String(o?.option ?? "").trim() === correct);
+            if (correctOpt && !String(correctOpt?.explanation ?? "").trim()) {
+              correctOpt.explanation = expl;
+            }
+          }
+        }
+      }
+    }
+  } catch {
+    // If filling fails, we still return the base recommendations.
+  }
   // add recommendation
   await my_content_mcq_bank_model.updateOne(
     { _id: contentId },
-    { "tracking.recommendedContent": data }
+    { "tracking.recommendedContent": normalizedData }
   );
 
   // update ai count
@@ -527,7 +898,7 @@ const generate_recommendation_from_ai = async (req: Request) => {
     { $inc: { count: 1 } },
     { upsert: true },
   );
-  return data;
+  return normalizedData;
 }
 export const ai_part_service = {
   chat_with_ai_tutor_from_ai,
