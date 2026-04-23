@@ -16,8 +16,6 @@ import { isAccountExist } from './../../utils/isAccountExist';
 import { TAccount, TLoginPayload, TRegisterPayload, TStatus } from "./auth.interface";
 import { Account_Model } from "./auth.schema";
 import mongoose from "mongoose";
-import { getNormalizedContentScopeForAccount } from "../../utils/normalizeProfileType";
-
 
 const buildVerificationUrl = (email: string) => {
   const secret = configs.jwt.verified_token as Secret;
@@ -532,28 +530,13 @@ const get_my_profile_from_db = async (email: string) => {
     throw new AppError("Account not found", httpStatus.NOT_FOUND);
   }
 
-  // 🔥 CRITICAL FIX: Normalize the profession/student type
-  const { profileType } = await getNormalizedContentScopeForAccount(
-    String(isExistAccount._id),
-    String(isExistAccount.role)
-  );
-
-  // Build the profile response dynamically
-  const profileData = { ...isExistAccount.profile_id } as Record<string, any>;
-  
-  if (isExistAccount.role === "PROFESSIONAL" && profileType) {
-    profileData.professionName = profileType;
-  } else if (isExistAccount.role === "STUDENT" && profileType) {
-    profileData.studentType = profileType;
-  }
-
   return {
     account: {
       ...isExistAccount,
       password: "",
-      profile_id: (profileData as any)?._id,
+      profile_id: isExistAccount.profile_id?._id,
     },
-    profile: profileData,
+    profile: isExistAccount.profile_id,
   };
 };
 
