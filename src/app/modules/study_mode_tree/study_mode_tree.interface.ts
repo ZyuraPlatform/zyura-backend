@@ -10,3 +10,4 @@ export type T_ContentManagementAdmin = {
   contentFor: "student" | "professional",
   profileType: string,
 } 
+
