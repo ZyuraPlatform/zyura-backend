@@ -12,6 +12,8 @@ const get_all_study_plan_from_db = async (req: Request) => {
   return result;
 };
 
+// study_planner.service.ts — replace save_study_plan_progress_into_db
+
 const save_study_plan_progress_into_db = async (req: Request) => {
   const { planId, day, suggest_content } = req.body as {
     planId: string;
@@ -19,7 +21,7 @@ const save_study_plan_progress_into_db = async (req: Request) => {
     suggest_content: string;
   };
 
-  // ✅ Step-1: specific hourly_breakdown item completed = true
+  // Step 1: Mark the specific task as completed
   const afterTaskUpdate = await study_planner_model.findOneAndUpdate(
     {
       _id: new Types.ObjectId(planId),
@@ -43,18 +45,18 @@ const save_study_plan_progress_into_db = async (req: Request) => {
     throw new AppError("Study plan not found", 404);
   }
 
-  // ✅ Step-2: check if that day's all hourly_breakdown completed
+  // Step 2: Check if this specific day is fully complete
   const targetDay = afterTaskUpdate.daily_plan.find((d) => d.day_number === day);
   if (!targetDay) {
-    throw new AppError("Day not found", 404);
+    throw new AppError("Day not found in plan", 404);
   }
 
   const isDayCompleted =
     targetDay.hourly_breakdown.length > 0 &&
     targetDay.hourly_breakdown.every((task) => task.isCompleted === true);
 
-  // ✅ If all done, update day.isCompleted = true (otherwise false)
-  const finalUpdated = await study_planner_model.findOneAndUpdate(
+  // Step 3: Update that day's isCompleted flag
+  const afterDayUpdate = await study_planner_model.findOneAndUpdate(
     {
       _id: new Types.ObjectId(planId),
       accountId: req?.user?.accountId,
@@ -62,14 +64,34 @@ const save_study_plan_progress_into_db = async (req: Request) => {
     {
       $set: {
         "daily_plan.$[d].isCompleted": isDayCompleted,
-        status: "completed"
       },
-
     },
     {
       new: true,
       arrayFilters: [{ "d.day_number": day }],
     }
+  ).lean();
+
+  if (!afterDayUpdate) {
+    throw new AppError("Failed to update day completion", 500);
+  }
+
+  // Step 4: Check if ALL days are now complete — only then mark plan as completed
+  const allDaysCompleted =
+    afterDayUpdate.daily_plan.length > 0 &&
+    afterDayUpdate.daily_plan.every((d) => d.isCompleted === true);
+
+  const finalUpdated = await study_planner_model.findOneAndUpdate(
+    {
+      _id: new Types.ObjectId(planId),
+      accountId: req?.user?.accountId,
+    },
+    {
+      $set: {
+        status: allDaysCompleted ? "completed" : "in_progress",
+      },
+    },
+    { new: true }
   ).lean();
 
   return finalUpdated;
@@ -112,9 +134,28 @@ const delete_study_plan_from_db = async (req: Request) => {
 };
 
 
+// Add to study_planner.service.ts (inside the service object too)
+
+const get_single_study_plan_from_db = async (req: Request) => {
+  const { planId } = req.params as { planId: string };
+  const accountId = req?.user?.accountId;
+
+  const result = await study_planner_model
+    .findOne({ _id: new Types.ObjectId(planId), accountId })
+    .lean();
+
+  if (!result) {
+    throw new AppError("Study plan not found", 404);
+  }
+
+  return result;
+};
+
+// ─── Add to the exported object ───────────────────────────────────────────
 export const study_planner_service = {
   get_all_study_plan_from_db,
+  get_single_study_plan_from_db,   // ← new
   save_study_plan_progress_into_db,
   cancel_study_plan_from_db,
-  delete_study_plan_from_db
+  delete_study_plan_from_db,
 };

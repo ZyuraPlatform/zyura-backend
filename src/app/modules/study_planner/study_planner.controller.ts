@@ -1,3 +1,5 @@
+// study_planner.controller.ts — full replacement
+
 import httpStatus from "http-status";
 import catchAsync from "../../utils/catch_async";
 import manageResponse from "../../utils/manage_response";
@@ -8,41 +10,56 @@ const get_all_study_plan = catchAsync(async (req, res) => {
   manageResponse(res, {
     statusCode: httpStatus.OK,
     success: true,
-    message: "Study plan fetched successful",
+    message: "Study plans fetched successfully",
     data: result,
   });
 });
+
+// ─── ADD THIS ─────────────────────────────────────────────────────────────
+const get_single_study_plan = catchAsync(async (req, res) => {
+  const result = await study_planner_service.get_single_study_plan_from_db(req);
+  manageResponse(res, {
+    statusCode: httpStatus.OK,
+    success: true,
+    message: "Study plan fetched successfully",
+    data: result,
+  });
+});
+
 const save_study_plan_progress = catchAsync(async (req, res) => {
   const result = await study_planner_service.save_study_plan_progress_into_db(req);
   manageResponse(res, {
     statusCode: httpStatus.OK,
     success: true,
-    message: "Study plan fetched successful",
+    message: "Progress saved successfully",
     data: result,
   });
 });
+
 const cancel_study_plan = catchAsync(async (req, res) => {
   const result = await study_planner_service.cancel_study_plan_from_db(req);
   manageResponse(res, {
     statusCode: httpStatus.OK,
     success: true,
-    message: "Study plan cancelled successful",
+    message: "Study plan cancelled successfully",
     data: result,
   });
 });
+
 const delete_study_plan = catchAsync(async (req, res) => {
   const result = await study_planner_service.delete_study_plan_from_db(req);
   manageResponse(res, {
     statusCode: httpStatus.OK,
     success: true,
-    message: "Study plan deleted successful",
+    message: "Study plan deleted successfully",
     data: result,
   });
 });
 
 export const study_planner_controller = {
   get_all_study_plan,
+  get_single_study_plan,   // ← new
   save_study_plan_progress,
   cancel_study_plan,
-  delete_study_plan
+  delete_study_plan,
 };

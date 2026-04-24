@@ -1,19 +1,34 @@
 import { model, Schema } from "mongoose";
 import { T_Goal, TAccuracy } from "./goal.interface";
 
+// goal.schema.ts — replace SelectedSubjectSchema
+
+const SelectedTopicSchema = new Schema(
+  {
+    topicName: { type: String, required: true },
+    subTopicNames: { type: [String], default: [] },
+    fullTopic: { type: Boolean, default: false },
+  },
+  { _id: false }
+);
+
+const SelectedSystemSchema = new Schema(
+  {
+    systemName: { type: String, required: true },
+    topics: { type: [SelectedTopicSchema], default: [] },
+    fullSystem: { type: Boolean, default: false },
+  },
+  { _id: false }
+);
+
 const SelectedSubjectSchema = new Schema(
   {
-    subjectName: {
-      type: String,
-      required: true,
-    },
-    systemNames: {
-      type: [String],
-      required: true,
-      default: [],
-    },
+    subjectName: { type: String, required: true },
+    systemNames: { type: [String], default: [] }, // kept for backward compat
+    systems: { type: [SelectedSystemSchema], default: [] }, // full hierarchy
+    fullSubject: { type: Boolean, default: false },
   },
-  { _id: false },
+  { _id: false }
 );
 
 const goal_schema = new Schema<T_Goal>(
