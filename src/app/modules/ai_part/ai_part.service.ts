@@ -333,37 +333,121 @@ const get_all_chat_thread_title_from_ai = async (req: Request) => {
   return data;
 };
 
+// ai_part.service.ts — replace generate_new_study_plan_from_ai
+
 const generate_new_study_plan_from_ai = async (req: Request) => {
   const isAccount = await isAccountExist(req?.user?.email as string, "profile_id") as any;
   const payload = req?.body;
-  if (req?.user?.role == "STUDENT") {
+
+  // ─── Build rich context from profile + preferences ───────────────────────
+  let profileContext: Record<string, any> = {};
+
+  if (req?.user?.role === "STUDENT") {
     payload.contentFor = "student";
-    payload.profileType = isAccount?.profile_id?.profileType
+    payload.profileType = isAccount?.profile_id?.profileType;
+    const pref = isAccount?.profile_id?.preference;
+    profileContext = {
+      studentType: isAccount?.profile_id?.studentType,
+      university: isAccount?.profile_id?.university,
+      yearOfStudy: isAccount?.profile_id?.year_of_study,
+      preparingFor: isAccount?.profile_id?.preparingFor,
+      preferredSubjects: pref?.subject ?? [],
+      preferredTopics: pref?.topic ?? [],
+      preferredSubTopics: pref?.subTopic ?? [],
+      systemPreference: pref?.systemPreference ?? [],
+    };
   }
-  if (req?.user?.role == "PROFESSIONAL") {
+
+  if (req?.user?.role === "PROFESSIONAL") {
     payload.contentFor = "professional";
-    payload.profileType = isAccount?.profile_id?.professionName
+    payload.profileType = isAccount?.profile_id?.professionName;
+    profileContext = {
+      professionName: isAccount?.profile_id?.professionName,
+      institution: isAccount?.profile_id?.institution,
+      experience: isAccount?.profile_id?.experience,
+    };
   }
+
+  // ─── Build enriched prompt ─────────────────────────────────────────────
+  const enrichedInput = {
+    ...payload,
+    userProfile: profileContext,
+  };
+
+  const systemPrompt = `
+You are a medical study plan generator for the Zyura platform.
+
+Generate a day-by-day study plan as valid JSON. The output must match this exact schema:
+
+{
+  "exam_name": "<string>",
+  "exam_date": "<YYYY-MM-DD>",
+  "exam_type": "<string>",
+  "daily_study_time": <number — hours per day>,
+  "topics": [
+    {
+      "subject": "<string>",
+      "system": "<string>",
+      "topic": "<string>",
+      "subtopic": "<string>"
+    }
+  ],
+  "plan_summary": "<1-sentence summary of the plan>",
+  "total_days": <number — days from today to exam_date>,
+  "daily_plan": [
+    {
+      "day_number": <number>,
+      "date": "<YYYY-MM-DD>",
+      "total_hours": <number>,
+      "topics": ["<topic string>"],
+      "hourly_breakdown": [
+        {
+          "task_type": "<one of: mcq, flashcard, notes, clinical case, osce>",
+          "description": "<clear task title e.g. 'Cardiac Pharmacology MCQs'>",
+          "duration_hours": <number>,
+          "duration_minutes": <number>,
+          "suggest_content": { "contentId": "", "limit": <number> },
+          "isCompleted": false
+        }
+      ],
+      "isCompleted": false
+    }
+  ]
+}
+
+Rules:
+- Generate a daily_plan entry for EVERY day from today until exam_date (inclusive).
+- Distribute topics evenly across days based on daily_study_time.
+- Each day must have at least 1 hourly_breakdown task.
+- Mix task types: use mcq, flashcard, notes, clinical case, osce across different days.
+- Use the userProfile preferences to prioritise subjects and topics if provided.
+- contentId must always be empty string "". Do NOT invent IDs.
+- Return ONLY valid JSON. No markdown, no explanation.
+`.trim();
+
   const data = await openaiChatJson<any>({
-    system:
-      "You generate a study plan JSON. Output must match the expected schema fields: exam_name, exam_date, exam_type, daily_study_time, topics[].",
-    user: JSON.stringify(payload),
+    system: systemPrompt,
+    user: JSON.stringify(enrichedInput),
     temperature: 0.2,
   });
+
+  // ─── Validate and persist ──────────────────────────────────────────────
   const parseData = await study_planner_validations.create.parseAsync(data);
+
   const result = await study_planner_model.create({
     ...parseData,
     accountId: req?.user?.accountId,
     status: "in_progress",
   });
+
   await daily_ai_request_model.updateOne(
     { date: today },
     { $inc: { count: 1 } },
     { upsert: true },
   );
+
   return result;
 };
-
 const generate_flashcard_from_ai = async (req: Request) => {
   const payload = req.body;
   const fileText =
