@@ -5,6 +5,7 @@ import { excelConverter } from "../../utils/excel_converter";
 import { buildGoalContentFilter } from "../../utils/findContentQueryBuilder";
 import { isAccountExist } from "../../utils/isAccountExist";
 import { getNormalizedContentScopeForAccount } from "../../utils/normalizeProfileType";
+import { seededShuffle } from "../../utils/seededShuffle";
 import {
   buildFlatIndex,
   findFuzzyDuplicatesFromIndex,
@@ -178,6 +179,7 @@ const get_all_mcq_banks = async (req: Request) => {
     system = "",
     topic = "",
     subtopic = "",
+    applyGoalFilter = "false",
   } = req.query as any;
 
   const filters: any = {};
@@ -199,26 +201,47 @@ const get_all_mcq_banks = async (req: Request) => {
     filters.title = { $regex: searchTerm, $options: "i" };
   }
 
+  const shouldApplyGoalFilter =
+    String(applyGoalFilter).toLowerCase() === "true" &&
+    String(req?.user?.role || "") === "STUDENT";
 
-  const goal = await goal_model.findOne({
-    studentId: req?.user?.accountId,
-    goalStatus: "IN_PROGRESS",
-  });
+  const goal = shouldApplyGoalFilter
+    ? await goal_model.findOne({
+        studentId: req?.user?.accountId,
+        goalStatus: "IN_PROGRESS",
+      })
+    : null;
 
-  const finalFilters = buildGoalContentFilter(goal, filters);
+  const finalFilters = shouldApplyGoalFilter
+    ? buildGoalContentFilter(goal, filters)
+    : filters;
 
  
   const pageNumber = parseInt(page, 10);
   const limitNumber = parseInt(limit, 10);
   const skip = (pageNumber - 1) * limitNumber;
 
-  // ✅ Do NOT fetch mcqs array in listing — use totalMcq counter or $size
-  let result = await McqBankModel.find(finalFilters)
-    .select("-mcqs -__v")
-    .skip(skip)
-    .limit(limitNumber)
-    .sort({ createdAt: -1 })
-    .lean();
+
+  let result = await McqBankModel.aggregate([
+    { $match: finalFilters },
+    { $sort: { createdAt: -1 } },
+    { $skip: skip },
+    { $limit: limitNumber },
+    {
+      $project: {
+        title: 1,
+        subject: 1,
+        system: 1,
+        topic: 1,
+        subtopic: 1,
+        uploadedBy: 1,
+        createdAt: 1,
+        contentFor: 1,
+        profileType: 1,
+        totalMcq: { $size: { $ifNull: ["$mcqs", []] } },
+      },
+    },
+  ]);
 
   let total = await McqBankModel.countDocuments(finalFilters);
 
@@ -229,27 +252,57 @@ const get_all_mcq_banks = async (req: Request) => {
   // Safe fallback: if goal filter yields nothing and user didn't explicitly filter/search,
   // show all content for their profileType instead of a blank screen.
   if (didApplyGoalFilter && !didUserSpecifyFilters && total === 0) {
-    result = await McqBankModel.find(filters)
-      .select("-mcqs -__v")
-      .skip(skip)
-      .limit(limitNumber)
-      .sort({ createdAt: -1 })
-      .lean();
+    result = await McqBankModel.aggregate([
+      { $match: filters },
+      { $sort: { createdAt: -1 } },
+      { $skip: skip },
+      { $limit: limitNumber },
+      {
+        $project: {
+          title: 1,
+          subject: 1,
+          system: 1,
+          topic: 1,
+          subtopic: 1,
+          uploadedBy: 1,
+          createdAt: 1,
+          contentFor: 1,
+          profileType: 1,
+          totalMcq: { $size: { $ifNull: ["$mcqs", []] } },
+        },
+      },
+    ]);
     total = await McqBankModel.countDocuments(filters);
   }
 
   // Safe fallback: if profileType filter yields nothing, show all content for the role's contentFor.
-  // if (!didUserSpecifyFilters && total === 0 && filters?.contentFor && filters?.profileType) {
-  //   const fallbackFilters = { ...filters };
-  //   delete fallbackFilters.profileType;
-  //   result = await McqBankModel.find(fallbackFilters)
-  //     .select("-mcqs -__v")
-  //     .skip(skip)
-  //     .limit(limitNumber)
-  //     .sort({ createdAt: -1 })
-  //     .lean();
-  //   total = await McqBankModel.countDocuments(fallbackFilters);
-  // }
+  // This matches the study-mode-tree behavior: if a new profileType has no seeded content yet,
+  // we avoid an "empty app" by falling back to contentFor scope only.
+  if (!didUserSpecifyFilters && total === 0 && filters?.contentFor && filters?.profileType) {
+    const fallbackFilters = { ...filters };
+    delete fallbackFilters.profileType;
+    result = await McqBankModel.aggregate([
+      { $match: fallbackFilters },
+      { $sort: { createdAt: -1 } },
+      { $skip: skip },
+      { $limit: limitNumber },
+      {
+        $project: {
+          title: 1,
+          subject: 1,
+          system: 1,
+          topic: 1,
+          subtopic: 1,
+          uploadedBy: 1,
+          createdAt: 1,
+          contentFor: 1,
+          profileType: 1,
+          totalMcq: { $size: { $ifNull: ["$mcqs", []] } },
+        },
+      },
+    ]);
+    total = await McqBankModel.countDocuments(fallbackFilters);
+  }
 
   return {
     meta: {
@@ -266,7 +319,7 @@ const get_all_mcq_banks = async (req: Request) => {
       topic: item.topic,
       subtopic: item.subtopic,
       uploadedBy: item.uploadedBy,
-      totalMcq: item.totalMcq ?? 0,
+      totalMcq: Number(item.totalMcq ?? 0),
       createdAt: item.createdAt,
       contentFor: item.contentFor,
       profileType: item.profileType,
@@ -331,6 +384,7 @@ const get_single_mcq_bank = async (req: Request): Promise<any> => {
   const limit = parseInt(req.query.limit as string) || 10;
   const searchTerm = (req.query.searchTerm as string) || "";
   const difficulty = (req.query.difficulty as string) || "";
+  const shuffle = (req.query.shuffle as string) ?? "true";
 
   const result = await McqBankModel.findById(id)
     .select("-__v")
@@ -351,6 +405,18 @@ const get_single_mcq_bank = async (req: Request): Promise<any> => {
     filteredMcqs = filteredMcqs.filter(
       (mcq: any) => mcq.difficulty === difficulty,
     );
+  }
+
+  // Shuffle (student/professional only), before pagination so paging doesn't repeat questions.
+  // IDs remain unchanged; only order changes.
+  const role = String(req?.user?.role || "");
+  const shouldShuffle =
+    String(shuffle).toLowerCase() !== "false" &&
+    (role === "STUDENT" || role === "PROFESSIONAL");
+  if (shouldShuffle) {
+    const accountId = String(req?.user?.accountId || "");
+    const seed = `mcqbank:${id}:acct:${accountId}`;
+    filteredMcqs = seededShuffle(filteredMcqs, seed);
   }
 
   const total = filteredMcqs.length;

@@ -6,6 +6,7 @@ import {
   buildFlatIndex,
   findFuzzyDuplicatesFromIndex,
 } from "../../utils/stringSimilarity";
+import { seededShuffle } from "../../utils/seededShuffle";
 import { ProfessionalModel } from "../professional/professional.schema";
 import { McqBankModel } from "../mcq_bank/mcq_bank.schema";
 import { T_Exam_Professional, T_Exam_Student, TRawMcqRow } from "./exam.interface";
@@ -196,11 +197,21 @@ const get_single_student_exam_from_db = async (req: Request) => {
   const { id } = req?.params as Record<string, string>;
   const page = parseInt(req.query.page as string) || 1;
   const limit = parseInt(req.query.limit as string) || 10;
+  const shuffle = (req.query.shuffle as string) ?? "true";
   const result = await exam_model_student.findById(id).lean();
 
-  const total = result?.mcqs?.length || 0;
+  const role = String(req?.user?.role || "");
+  const shouldShuffle =
+    String(shuffle).toLowerCase() !== "false" &&
+    (role === "STUDENT" || role === "PROFESSIONAL");
+
+  const allMcqs = shouldShuffle
+    ? seededShuffle(result?.mcqs ?? [], `exam_student:${id}:acct:${String(req?.user?.accountId || "")}`)
+    : (result?.mcqs ?? []);
+
+  const total = allMcqs.length || 0;
   const skip = (page - 1) * limit;
-  const paginatedMcqs = result?.mcqs?.slice(skip, skip + limit);
+  const paginatedMcqs = allMcqs.slice(skip, skip + limit);
 
   return {
     data: { ...result, mcqs: paginatedMcqs },
@@ -258,14 +269,25 @@ const add_more_mcq_into_student_exam_into_db = async (req: Request) => {
   const body = req?.body?.mcqs;
   const existingMcqBank = await exam_model_student
     .findById(id)
-    .select("-mcqs")
+    .select("mcqs.mcqId totalQuestions")
     .lean();
   if (!existingMcqBank) throw new AppError("Exam not found", 404);
-  const lastMcqIndex = existingMcqBank?.totalQuestions ?? 0;
+
+  // IMPORTANT:
+  // Do NOT use totalQuestions to generate next MCQ id — it can shrink after deletions,
+  // causing duplicate mcqId (React key collisions => one row "missing" in admin UI).
+  const existingIds = (existingMcqBank as any)?.mcqs?.map((m: any) => String(m?.mcqId || "")) ?? [];
+  const maxExistingIndex = existingIds.reduce((max: number, idStr: string) => {
+    const m = idStr.match(/^MCQ-(\d+)$/);
+    const n = m ? Number(m[1]) : NaN;
+    return Number.isFinite(n) ? Math.max(max, n) : max;
+  }, 0);
 
   const payload = body.map((item: any, idx: number) => ({
     ...item,
-    mcqId: `MCQ-${String(lastMcqIndex + idx + 1).padStart(6, "0")}`,
+    mcqId:
+      item.mcqId ||
+      `MCQ-${String(maxExistingIndex + idx + 1).padStart(6, "0")}`,
   }));
 
   payload.forEach((mcq: any) => {
@@ -401,11 +423,21 @@ const get_single_professional_exam_from_db = async (req: Request) => {
   const { id } = req?.params as Record<string, string>;
   const page = parseInt(req.query.page as string) || 1;
   const limit = parseInt(req.query.limit as string) || 10;
+  const shuffle = (req.query.shuffle as string) ?? "true";
   const result = await exam_model_professional.findById(id).lean();
 
-  const total = result?.mcqs?.length || 0;
+  const role = String(req?.user?.role || "");
+  const shouldShuffle =
+    String(shuffle).toLowerCase() !== "false" &&
+    (role === "STUDENT" || role === "PROFESSIONAL");
+
+  const allMcqs = shouldShuffle
+    ? seededShuffle(result?.mcqs ?? [], `exam_professional:${id}:acct:${String(req?.user?.accountId || "")}`)
+    : (result?.mcqs ?? []);
+
+  const total = allMcqs.length || 0;
   const skip = (page - 1) * limit;
-  const paginatedMcqs = result?.mcqs?.slice(skip, skip + limit);
+  const paginatedMcqs = allMcqs.slice(skip, skip + limit);
 
   return {
     data: { ...result, mcqs: paginatedMcqs },
@@ -463,16 +495,23 @@ const add_more_mcq_into_professional_exam_into_db = async (req: Request) => {
   const body = req?.body?.mcqs;
   const existingMcqBank = await exam_model_professional
     .findById(id)
-    .select("-mcqs")
+    .select("mcqs.mcqId totalQuestions")
     .lean();
   if (!existingMcqBank) throw new AppError("Exam not found", 404);
-  const lastMcqIndex = existingMcqBank?.totalQuestions ?? 0;
+
+  // Same reasoning as student: avoid duplicate mcqId after deletions.
+  const existingIds = (existingMcqBank as any)?.mcqs?.map((m: any) => String(m?.mcqId || "")) ?? [];
+  const maxExistingIndex = existingIds.reduce((max: number, idStr: string) => {
+    const m = idStr.match(/^MCQ-(\d+)$/);
+    const n = m ? Number(m[1]) : NaN;
+    return Number.isFinite(n) ? Math.max(max, n) : max;
+  }, 0);
 
   const payload = body.map((item: any, idx: number) => ({
     ...item,
     mcqId:
       item.mcqId ||
-      `MCQ-${String(lastMcqIndex + idx + 1).padStart(6, "0")}`,
+      `MCQ-${String(maxExistingIndex + idx + 1).padStart(6, "0")}`,
   }));
 
   payload.forEach((mcq: any) => {
