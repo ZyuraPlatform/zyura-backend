@@ -431,8 +431,61 @@ Rules:
     temperature: 0.2,
   });
 
-  // ─── Validate and persist ──────────────────────────────────────────────
-  const parseData = await study_planner_validations.create.parseAsync(data);
+  // ─── Validate and persist ──────────────────────────────────────────────────
+  let parseData: any;
+  try {
+    parseData = await study_planner_validations.create.parseAsync(data);
+  } catch {
+    const retryPrompt = `
+You are a medical study plan generator for the Zyura platform.
+The previous response did not include required study plan fields or failed validation.
+Return a single valid JSON object that matches this exact schema:
+
+{
+  "exam_name": "<string>",
+  "exam_date": "<YYYY-MM-DD>",
+  "exam_type": "<string>",
+  "daily_study_time": <number>,
+  "topics": [{ "subject": "<string>", "system": "<string>", "topic": "<string>", "subtopic": "<string>" }],
+  "plan_summary": "<1-sentence summary of the plan>",
+  "total_days": <number>,
+  "daily_plan": [{
+    "day_number": <number>,
+    "date": "<YYYY-MM-DD>",
+    "total_hours": <number>,
+    "topics": ["<topic string>"],
+    "hourly_breakdown": [{
+      "task_type": "<one of: mcq, flashcard, notes, clinical case, osce>",
+      "description": "<task title>",
+      "duration_hours": <number>,
+      "duration_minutes": <number>,
+      "suggest_content": { "contentId": "", "limit": <number> }
+    }],
+    "isCompleted": false
+  }]
+}
+
+Rules:
+- Return ONLY valid JSON. No markdown, no explanation.
+- Include plan_summary, total_days, and daily_plan exactly as shown.
+- Keep contentId as an empty string.
+- If a field is missing, infer it from the exam and topic data.
+`.trim();
+
+    const retryData = await openaiChatJson<any>({
+      system: retryPrompt,
+      user: JSON.stringify({ input: enrichedInput, previousResponse: data }),
+      temperature: 0,
+    });
+
+    try {
+      parseData = await study_planner_validations.create.parseAsync(retryData);
+    } catch (secondError) {
+      throw new Error(
+        "OpenAI failed to return a valid study plan after retry. Please check the AI response format and schema."
+      );
+    }
+  }
 
   const result = await study_planner_model.create({
     ...parseData,
