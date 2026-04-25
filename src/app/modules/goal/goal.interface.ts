@@ -8,6 +8,16 @@ export type T_Goal = {
   selectedSubjects: {
     subjectName: string;
     systemNames: string[];
+    systems?: {
+      systemName: string;
+      topics: {
+        topicName: string;
+        subTopicNames: string[];
+        fullTopic?: boolean;
+      }[];
+      fullSystem?: boolean;
+    }[];
+    fullSubject?: boolean;
   }[];
   studentId: string;
   goalStatus: "EXPIRED" | "IN_PROGRESS" | "COMPLETED";
