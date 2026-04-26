@@ -201,6 +201,7 @@ const update_tracking = async (req: Request) => {
     correctMcqCount,
     wrongMcqCount,
     timeTaken,
+    answers,
   } = req.body;
   const id = req?.params?.id as string;
 
@@ -236,6 +237,17 @@ const update_tracking = async (req: Request) => {
     "tracking.correctPercentage": correctPercentage,
     "tracking.wrongPercentage": wrongPercentage,
     "tracking.unattemptedPercentage": unattemptedPercentage,
+    ...(Array.isArray(answers)
+      ? {
+          "tracking.lastAttemptAnswers": answers
+            .filter((a: any) => a && typeof a === "object")
+            .map((a: any) => ({
+              mcqId: String(a.mcqId ?? "").trim(),
+              userSelectedOption: String(a.userSelectedOption ?? "").trim(),
+            }))
+            .filter((a: any) => a.mcqId && a.userSelectedOption),
+        }
+      : {}),
   };
   const result = await my_content_mcq_bank_model.findByIdAndUpdate(
     id,

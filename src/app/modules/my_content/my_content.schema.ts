@@ -32,6 +32,11 @@ const tracking_schema = new Schema({
     correctPercentage: { type: Number, default: 0 },
     wrongPercentage: { type: Number, default: 0 },
     unattemptedPercentage: { type: Number, default: 0 },
+    // Persist the latest attempt's per-question answers for reliable review later.
+    lastAttemptAnswers: {
+        type: [{ mcqId: { type: String }, userSelectedOption: { type: String } }],
+        default: []
+    },
     recommendedContent: { type: Schema.Types.Mixed }
 }, { _id: false, timestamps: false, versionKey: false })
 
