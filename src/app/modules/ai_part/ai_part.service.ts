@@ -24,6 +24,7 @@ import { study_planner_model } from "../study_planner/study_planner.schema";
 import { study_planner_validations } from "../study_planner/study_planner.validation";
 import { openaiChatJson, openaiChatText } from "../../utils/openai";
 import { ai_tutor_thread_model } from "./ai_tutor.schema";
+import { normalizeMcqs, normalizeMcqsWithStats } from "./mcqNormalize";
 const today = new Date().toISOString().split("T")[0];
 
 type TutorCategory = "medical_exam" | "platform_help" | "other";
@@ -147,49 +148,6 @@ const classifyTutorQuestion = async (question: string): Promise<{
     // Fail-safe: do not answer off-topic if classifier fails.
     return { category: "other", inDomain: false, reasonShort: "classifier_failed" };
   }
-};
-
-const ensureMcqOptions = (options: any) => {
-  // Accepts: array of {option, optionText, explanation?}
-  if (Array.isArray(options)) {
-    return options
-      .filter((o) => o && typeof o === "object")
-      .map((o) => ({
-        option: String(o.option || "").trim(),
-        optionText: String(o.optionText || o.text || "").trim(),
-        explanation: o.explanation ? String(o.explanation) : undefined,
-      }))
-      .filter((o) => o.option && o.optionText);
-  }
-  // Accepts: object map {A: "...", B: "..."}
-  if (options && typeof options === "object") {
-    return Object.entries(options)
-      .map(([k, v]) => ({
-        option: String(k).trim(),
-        optionText: String(v || "").trim(),
-      }))
-      .filter((o) => o.option && o.optionText);
-  }
-  return [];
-};
-
-const normalizeMcqs = (raw: any) => {
-  const arr = Array.isArray(raw) ? raw : Array.isArray(raw?.mcqs) ? raw.mcqs : [];
-  return arr
-    .filter((m: any) => m && typeof m === "object")
-    .map((m: any, idx: number) => {
-      const options = ensureMcqOptions(m.options);
-      const correct = String(m.correctOption || m.correctAnswer || "").trim();
-      const difficulty = String(m.difficulty || m.difficultyLevel || "Basic").trim();
-      return {
-        mcqId: String(m.mcqId || `AI-${idx + 1}`),
-        difficulty: (["Basic", "Intermediate", "Advance"].includes(difficulty) ? difficulty : "Basic"),
-        question: String(m.question || "").trim(),
-        options,
-        correctOption: (["A", "B", "C", "D", "E", "F"].includes(correct) ? correct : options?.[0]?.option || "A"),
-      };
-    })
-    .filter((m: any) => m.question && Array.isArray(m.options) && m.options.length >= 2);
 };
 
 const normalizeFlashcards = (raw: any) => {
@@ -649,7 +607,32 @@ const generate_mcq_from_ai = async (req: Request) => {
     user: JSON.stringify(payload),
     temperature: 0.3,
   });
-  const mcqs = normalizeMcqs(data);
+  let { mcqs, dropped } = normalizeMcqsWithStats(data);
+  const total = Array.isArray(data?.mcqs) ? data.mcqs.length : Array.isArray(data) ? data.length : 0;
+  const droppedRatio = total > 0 ? dropped / total : 1;
+
+  // One-shot repair pass if AI returns malformed labels (common: "a", "(B)", "Option C", numeric index).
+  if (mcqs.length === 0 || droppedRatio >= 0.25) {
+    const repair = await openaiChatJson<any>({
+      system: [
+        "You previously generated MCQs but the output was invalid or inconsistent.",
+        "Fix and return ONLY valid JSON with the exact shape:",
+        "{\"mcqs\":[{\"mcqId\":\"...\",\"difficulty\":\"Basic|Intermediate|Advance\",\"question\":\"...\",\"options\":[{\"option\":\"A|B|C|D|E|F\",\"optionText\":\"...\",\"explanation\":\"...\"}],\"correctOption\":\"A|B|C|D|E|F\"}]}",
+        "",
+        "Hard rules:",
+        "- Every options[i].option MUST be a single uppercase letter A-F.",
+        "- correctOption MUST match one of the provided options[].option for that MCQ.",
+        "- Use 4 options (A-D) unless more are genuinely needed.",
+        "- Return ONLY JSON. No markdown. No extra keys.",
+      ].join("\n"),
+      user: JSON.stringify({
+        input: payload,
+        previousResponse: data,
+      }),
+      temperature: 0,
+    });
+    ({ mcqs, dropped } = normalizeMcqsWithStats(repair));
+  }
   // Guarantee at least the correct option has an explanation (fallback fill).
   try {
     const missing = mcqs
@@ -860,7 +843,31 @@ const mcq_generator_from_ai = async (req: Request) => {
     user: JSON.stringify({ ...payload, fileText: fileText || undefined }),
     temperature: 0.3,
   });
-  const mcqs = normalizeMcqs(data);
+  let { mcqs, dropped } = normalizeMcqsWithStats(data);
+  const total = Array.isArray(data?.mcqs) ? data.mcqs.length : Array.isArray(data) ? data.length : 0;
+  const droppedRatio = total > 0 ? dropped / total : 1;
+
+  if (mcqs.length === 0 || droppedRatio >= 0.25) {
+    const repair = await openaiChatJson<any>({
+      system: [
+        "You previously generated MCQs but the output was invalid or inconsistent.",
+        "Fix and return ONLY valid JSON with the exact shape:",
+        "{\"mcqs\":[{\"mcqId\":\"...\",\"difficulty\":\"Basic|Intermediate|Advance\",\"question\":\"...\",\"options\":[{\"option\":\"A|B|C|D|E|F\",\"optionText\":\"...\",\"explanation\":\"...\"}],\"correctOption\":\"A|B|C|D|E|F\"}]}",
+        "",
+        "Hard rules:",
+        "- Every options[i].option MUST be a single uppercase letter A-F.",
+        "- correctOption MUST match one of the provided options[].option for that MCQ.",
+        "- Use 4 options (A-D) unless more are genuinely needed.",
+        "- Return ONLY JSON. No markdown. No extra keys.",
+      ].join("\n"),
+      user: JSON.stringify({
+        input: { ...payload, fileText: fileText || undefined },
+        previousResponse: data,
+      }),
+      temperature: 0,
+    });
+    ({ mcqs, dropped } = normalizeMcqsWithStats(repair));
+  }
   const finalPayload: Partial<T_MyContent_mcq> = {
     title: payload?.quiz_name || data?.title,
     subject: payload?.subject,
