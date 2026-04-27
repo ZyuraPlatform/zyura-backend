@@ -27,7 +27,8 @@ import { ai_tutor_thread_model } from "./ai_tutor.schema";
 import { normalizeMcqs, normalizeMcqsWithStats } from "./mcqNormalize";
 const today = new Date().toISOString().split("T")[0];
 
-type TutorCategory = "medical_exam" | "platform_help" | "other";
+type TutorCategory = "medical_exam" | "platform_help" | "writing_assist" | "other";
+type TutorIntent = "medical" | "platform" | "writing" | "other";
 
 const outOfScopeReply =
   "I’m here to help with medical exam prep and Zyura platform questions. Please share your exam/topic (e.g., cardiology, pharmacology, OSCE, MCQs, study plan) and I’ll help.";
@@ -37,6 +38,25 @@ const normalizeText = (v: unknown) =>
     .toLowerCase()
     .replace(/\s+/g, " ")
     .trim();
+
+const looksWritingRequest = (q: string) => {
+  const s = normalizeText(q);
+  if (!s) return false;
+
+  // High-precision patterns for drafting/writing tasks.
+  const hasWriteVerb = /\b(write|draft|compose|reply|respond|format|rephrase|edit|polish|create)\b/.test(s);
+  const hasWritingNoun = /\b(email|e-mail|message|letter|mail|sms|whatsapp|dm|text|application|cover\s*letter)\b/.test(s);
+  const hasGreetingOrSubject = /\b(dear\s+(dr|doctor|sir|madam)|subject\s*:)\b/.test(s);
+  const hasRecipientCue = /\b(to|for)\s+(the\s+)?(department|doctor|dr|hospital|clinic|neurology|cardiology|radiology|hr|admin|professor)\b/.test(s);
+
+  // Typical: "write an email to neurology department ..."
+  if ((hasWriteVerb && hasWritingNoun) || (hasWritingNoun && hasRecipientCue) || hasGreetingOrSubject) {
+    // Avoid misclassifying pure medical explanation requests like:
+    // "Explain EMG" (no writing noun/recipient cue)
+    return true;
+  }
+  return false;
+};
 
 const looksMedicalExamRelated = (q: string) => {
   const s = normalizeText(q);
@@ -76,6 +96,25 @@ const looksMedicalExamRelated = (q: string) => {
     "step 1",
     "step 2",
     "step 3",
+
+    // Broader clinical / diagnostics / neuro-monitoring (avoid false blocks)
+    "ssep",
+    "mep",
+    "emg",
+    "ncs",
+    "nerve",
+    "impulse",
+    "evoked potential",
+    "intraoperative monitoring",
+    "spinal cord",
+    "neurologic",
+    "neuro",
+    "pathway",
+    "lesion",
+    "reflex",
+    "sensory",
+    "motor",
+    "monitoring",
   ];
   return keywords.some((k) => s.includes(k));
 };
@@ -102,20 +141,24 @@ const looksPlatformHelpRelated = (q: string) => {
 };
 
 const parseTutorCategory = (v: unknown): TutorCategory | null => {
-  if (v === "medical_exam" || v === "platform_help" || v === "other") return v;
+  if (v === "medical_exam" || v === "platform_help" || v === "writing_assist" || v === "other") return v;
   return null;
 };
 
 const classifyTutorQuestion = async (question: string): Promise<{
   category: TutorCategory;
   inDomain: boolean;
+  intent: TutorIntent;
   reasonShort?: string;
 }> => {
+  if (looksWritingRequest(question)) {
+    return { category: "writing_assist", inDomain: true, intent: "writing", reasonShort: "keyword_writing" };
+  }
   if (looksPlatformHelpRelated(question)) {
-    return { category: "platform_help", inDomain: true, reasonShort: "keyword_platform" };
+    return { category: "platform_help", inDomain: true, intent: "platform", reasonShort: "keyword_platform" };
   }
   if (looksMedicalExamRelated(question)) {
-    return { category: "medical_exam", inDomain: true, reasonShort: "keyword_medical" };
+    return { category: "medical_exam", inDomain: true, intent: "medical", reasonShort: "keyword_medical" };
   }
 
   try {
@@ -124,29 +167,42 @@ const classifyTutorQuestion = async (question: string): Promise<{
         "You are a strict classifier for Zyura AI Tutor.",
         "Decide whether the user question is in scope.",
         "In-scope categories:",
-        '- medical_exam: medicine/clinical science, exam prep, MCQs, OSCE, diagnostics, treatments, study strategy for medical exams.',
+        '- medical_exam: medicine/clinical science, diagnostics, treatments, general medical questions, exam prep, MCQs, OSCE, study strategy for medical exams.',
         '- platform_help: questions about using Zyura features (flashcards, MCQ bank, study plan, notes, uploads, dashboard).',
+        '- writing_assist: drafting professional messages/emails/letters related to healthcare or the Zyura platform (templates only; not medical advice).',
         "Out-of-scope category:",
         "- other: general trivia, holidays, celebrities, politics, unrelated tech, etc.",
         "",
-        'Return ONLY valid JSON exactly matching: {"category":"medical_exam|platform_help|other","inDomain":true|false,"reasonShort":"..."}',
+        'Return ONLY valid JSON exactly matching: {"category":"medical_exam|platform_help|writing_assist|other","inDomain":true|false,"intent":"medical|platform|writing|other","reasonShort":"..."}',
         "",
         "Examples:",
         'Q: "When is Diwali?" -> {"category":"other","inDomain":false,"reasonShort":"holiday_trivia"}',
-        'Q: "Explain sensitivity vs specificity with an example" -> {"category":"medical_exam","inDomain":true,"reasonShort":"exam_concept"}',
-        'Q: "How do I generate flashcards on Zyura?" -> {"category":"platform_help","inDomain":true,"reasonShort":"zyura_feature"}',
+        'Q: "Explain SSEPs vs MEPs vs EMG" -> {"category":"medical_exam","inDomain":true,"intent":"medical","reasonShort":"clinical_concept"}',
+        'Q: "Explain sensitivity vs specificity with an example" -> {"category":"medical_exam","inDomain":true,"intent":"medical","reasonShort":"exam_concept"}',
+        'Q: "How do I generate flashcards on Zyura?" -> {"category":"platform_help","inDomain":true,"intent":"platform","reasonShort":"zyura_feature"}',
+        'Q: "Write an email to the neurology department asking for an appointment" -> {"category":"writing_assist","inDomain":true,"intent":"writing","reasonShort":"email_template"}',
       ].join("\n"),
       user: JSON.stringify({ question }),
       temperature: 0,
     });
 
     const category = parseTutorCategory(result?.category) ?? "other";
+    const intent: TutorIntent =
+      result?.intent === "medical" || result?.intent === "platform" || result?.intent === "writing" || result?.intent === "other"
+        ? result.intent
+        : category === "medical_exam"
+          ? "medical"
+          : category === "platform_help"
+            ? "platform"
+            : category === "writing_assist"
+              ? "writing"
+              : "other";
     const inDomain = Boolean(result?.inDomain) && category !== "other";
     const reasonShort = typeof result?.reasonShort === "string" ? result.reasonShort.slice(0, 80) : undefined;
-    return { category, inDomain, reasonShort };
+    return { category, inDomain, intent, reasonShort };
   } catch {
     // Fail-safe: do not answer off-topic if classifier fails.
-    return { category: "other", inDomain: false, reasonShort: "classifier_failed" };
+    return { category: "other", inDomain: false, intent: "other", reasonShort: "classifier_failed" };
   }
 };
 
@@ -212,17 +268,28 @@ const chat_with_ai_tutor_from_ai = async (req: Request) => {
     return { thread_id: threadId, response: responseText };
   }
 
+  const isWritingAssist = classification.category === "writing_assist";
+  const systemPrompt = isWritingAssist
+    ? [
+        "You are Zyura Writing Assistant.",
+        "Task: draft short professional templates (emails/messages/letters) related to healthcare or the Zyura platform.",
+        "",
+        "Rules:",
+        "- Do NOT give medical advice, diagnosis, treatment, or interpret clinical results.",
+        "- Keep the output concise and practical.",
+        "- Use neutral placeholders like [Your Name], [DOB], [Date], [Phone].",
+        "- If critical info is missing, make safe assumptions and use placeholders (do not ask back-and-forth questions).",
+        "- Output plain text only (no markdown).",
+      ].join("\n")
+    : [
+        "You are Zyura AI Tutor.",
+        "Scope: medical/clinical questions, medical exam prep (OSCE/MCQs/study strategy), and Zyura platform help.",
+        "If the user asks anything outside this scope, do NOT answer it; politely redirect them back to medical questions or Zyura usage questions.",
+        "Be concise, clinically accurate, and explain reasoning step-by-step when needed.",
+      ].join("\n");
+
   const messagesForOpenAI = [
-    {
-      role: "system" as const,
-      content:
-        [
-          "You are Zyura AI Tutor.",
-          "Scope: medical exam prep (medicine/clinical science/OSCE/MCQs/study strategy) and Zyura platform help.",
-          "If the user asks anything outside this scope, do NOT answer it; politely redirect them back to medical exam prep or Zyura usage questions.",
-          "Be concise, clinically accurate, and explain reasoning step-by-step when needed.",
-        ].join("\n"),
-    },
+    { role: "system" as const, content: systemPrompt },
     ...history.map((m) => ({
       role: m.type === "HumanMessage" ? ("user" as const) : ("assistant" as const),
       content: m.content,
@@ -230,7 +297,7 @@ const chat_with_ai_tutor_from_ai = async (req: Request) => {
     { role: "user" as const, content: qText },
   ];
 
-  const responseText = await openaiChatText({ messages: messagesForOpenAI, temperature: 0.3 });
+  const responseText = await openaiChatText({ messages: messagesForOpenAI, temperature: isWritingAssist ? 0.2 : 0.3 });
 
   await ai_tutor_thread_model.updateOne(
     { thread_id: threadId },
