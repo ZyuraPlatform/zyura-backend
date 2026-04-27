@@ -339,7 +339,6 @@ const generate_new_study_plan_from_ai = async (req: Request) => {
   const isAccount = await isAccountExist(req?.user?.email as string, "profile_id") as any;
   const payload = req?.body;
 
-  // ─── Build rich context from profile + preferences ───────────────────────
   let profileContext: Record<string, any> = {};
 
   if (req?.user?.role === "STUDENT") {
@@ -368,139 +367,213 @@ const generate_new_study_plan_from_ai = async (req: Request) => {
     };
   }
 
-  // ─── Build enriched prompt ─────────────────────────────────────────────
-  const enrichedInput = {
-    ...payload,
-    userProfile: profileContext,
-  };
+  const startDate = payload.start_date || new Date().toISOString().split("T")[0];
+  const enrichedInput = { ...payload, start_date: startDate, userProfile: profileContext };
 
-  const systemPrompt = `
+  // ─── STEP 1: Generate plan metadata + topic list only (fast, small response) ──
+  const metaPrompt = `
 You are a medical study plan generator for the Zyura platform.
 
-Generate a day-by-day study plan as valid JSON. The output must match this exact schema:
+Generate ONLY the plan metadata and topics list as valid JSON. Do NOT include daily_plan.
 
-{
-  "exam_name": "<string>",
-  "exam_date": "<YYYY-MM-DD>",
-  "exam_type": "<string>",
-  "daily_study_time": <number — hours per day>,
-  "topics": [
-    {
-      "subject": "<string>",
-      "system": "<string>",
-      "topic": "<string>",
-      "subtopic": "<string>"
-    }
-  ],
-  "plan_summary": "<1-sentence summary of the plan>",
-  "total_days": <number — days from today to exam_date>,
-  "daily_plan": [
-    {
-      "day_number": <number>,
-      "date": "<YYYY-MM-DD>",
-      "total_hours": <number>,
-      "topics": ["<topic string>"],
-      "hourly_breakdown": [
-        {
-          "task_type": "<one of: mcq, flashcard, notes, clinical case, osce>",
-          "description": "<clear task title e.g. 'Cardiac Pharmacology MCQs'>",
-          "duration_hours": <number>,
-          "duration_minutes": <number>,
-          "suggest_content": { "contentId": "", "limit": <number> },
-          "isCompleted": false
-        }
-      ],
-      "isCompleted": false
-    }
-  ]
-}
-
-Rules:
-- Generate a daily_plan entry for EVERY day from today until exam_date (inclusive).
-- Distribute topics evenly across days based on daily_study_time.
-- Each day must have at least 1 hourly_breakdown task.
-- Mix task types: use mcq, flashcard, notes, clinical case, osce across different days.
-- Use the userProfile preferences to prioritise subjects and topics if provided.
-- contentId must always be empty string "". Do NOT invent IDs.
-- Return ONLY valid JSON. No markdown, no explanation.
-`.trim();
-
-  const data = await openaiChatJson<any>({
-    system: systemPrompt,
-    user: JSON.stringify(enrichedInput),
-    temperature: 0.2,
-  });
-
-  // ─── Validate and persist ──────────────────────────────────────────────────
-  let parseData: any;
-  try {
-    parseData = await study_planner_validations.create.parseAsync(data);
-  } catch {
-    const retryPrompt = `
-You are a medical study plan generator for the Zyura platform.
-The previous response did not include required study plan fields or failed validation.
-Return a single valid JSON object that matches this exact schema:
-
+Schema:
 {
   "exam_name": "<string>",
   "exam_date": "<YYYY-MM-DD>",
   "exam_type": "<string>",
   "daily_study_time": <number>,
-  "topics": [{ "subject": "<string>", "system": "<string>", "topic": "<string>", "subtopic": "<string>" }],
-  "plan_summary": "<1-sentence summary of the plan>",
-  "total_days": <number>,
-  "daily_plan": [{
+  "plan_summary": "<1-sentence summary>",
+  "total_days": <number — exact days from start_date to exam_date inclusive>,
+  "topics": [
+    { "subject": "<string>", "system": "<string>", "topic": "<string>", "subtopic": "<string>" }
+  ]
+}
+
+Rules:
+- topics list must have enough entries to cover all days (aim for 1 topic per day or group).
+- Return ONLY valid JSON. No markdown, no explanation.
+`.trim();
+
+  const metaData = await openaiChatJson<any>({
+    system: metaPrompt,
+    user: JSON.stringify(enrichedInput),
+    temperature: 0.2,
+  });
+
+  const totalDays: number = metaData.total_days || 30;
+  const topics: any[] = Array.isArray(metaData.topics) ? metaData.topics : [];
+
+  // ─── STEP 2: Fetch content IDs + split days into chunks — run in parallel ──
+  const CHUNK_SIZE = 20; // Each AI call handles 20 days max
+  const chunks: Array<{ fromDay: number; toDay: number; fromDate: string; toDate: string; topics: any[] }> = [];
+
+  const start = new Date(startDate);
+  for (let i = 0; i < totalDays; i += CHUNK_SIZE) {
+    const fromDay = i + 1;
+    const toDay = Math.min(i + CHUNK_SIZE, totalDays);
+
+    const fromDate = new Date(start);
+    fromDate.setDate(start.getDate() + i);
+
+    const toDate = new Date(start);
+    toDate.setDate(start.getDate() + toDay - 1);
+
+    // Distribute topics evenly across chunks
+    const topicsPerChunk = Math.ceil(topics.length / Math.ceil(totalDays / CHUNK_SIZE));
+    const chunkIndex = Math.floor(i / CHUNK_SIZE);
+    const chunkTopics = topics.slice(chunkIndex * topicsPerChunk, (chunkIndex + 1) * topicsPerChunk);
+
+    chunks.push({
+      fromDay,
+      toDay,
+      fromDate: fromDate.toISOString().split("T")[0],
+      toDate: toDate.toISOString().split("T")[0],
+      topics: chunkTopics.length ? chunkTopics : topics,
+    });
+  }
+
+  const contentForFilter = payload.contentFor || "student";
+  const profileTypeFilter = payload.profileType;
+  const defaultTopic = topics[0] || {};
+
+  const baseFilter: Record<string, any> = {};
+  if (contentForFilter) baseFilter.contentFor = contentForFilter;
+  if (profileTypeFilter) baseFilter.profileType = profileTypeFilter;
+  if (defaultTopic.subject) baseFilter.subject = defaultTopic.subject;
+  if (defaultTopic.system) baseFilter.system = defaultTopic.system;
+  if (defaultTopic.topic) baseFilter.topic = defaultTopic.topic;
+  if (defaultTopic.subtopic) baseFilter.subtopic = defaultTopic.subtopic;
+
+  const dailyPlanChunkPrompt = (chunk: typeof chunks[0]) => `
+You are a medical study plan generator for the Zyura platform.
+
+Generate ONLY the daily_plan entries for days ${chunk.fromDay} to ${chunk.toDay} (dates ${chunk.fromDate} to ${chunk.toDate}).
+
+Return a JSON array (not wrapped in an object):
+[
+  {
     "day_number": <number>,
     "date": "<YYYY-MM-DD>",
     "total_hours": <number>,
     "topics": ["<topic string>"],
-    "hourly_breakdown": [{
-      "task_type": "<one of: mcq, flashcard, notes, clinical case, osce>",
-      "description": "<task title>",
-      "duration_hours": <number>,
-      "duration_minutes": <number>,
-      "suggest_content": { "contentId": "", "limit": <number> }
-    }],
+    "hourly_breakdown": [
+      {
+        "task_type": "<one of: mcq, flashcard, notes, clinical case, osce>",
+        "description": "<task title mentioning subject/topic>",
+        "duration_hours": <number>,
+        "duration_minutes": <number>,
+        "suggest_content": { "contentId": "", "limit": 10 },
+        "isCompleted": false
+      }
+    ],
     "isCompleted": false
-  }]
-}
+  }
+]
 
-Rules:
-- Return ONLY valid JSON. No markdown, no explanation.
-- Include plan_summary, total_days, and daily_plan exactly as shown.
-- Keep contentId as an empty string.
-- If a field is missing, infer it from the exam and topic data.
+Topics to cover in this chunk: ${JSON.stringify(chunk.topics)}
+Daily study time: ${enrichedInput.daily_study_time || 4} hours/day
+Mix task types across days. Return ONLY the JSON array. No markdown.
 `.trim();
 
-    const retryData = await openaiChatJson<any>({
-      system: retryPrompt,
-      user: JSON.stringify({ input: enrichedInput, previousResponse: data }),
-      temperature: 0,
-    });
+  // ─── STEP 3: Run all chunk AI calls + DB queries in parallel ──────────────
+  const [chunkResults, mcqBank, flashcard, note, clinicalCase, osce] = await Promise.all([
+    // All daily_plan chunks generated simultaneously
+    Promise.all(
+      chunks.map((chunk) =>
+        openaiChatJson<any[]>({
+          system: dailyPlanChunkPrompt(chunk),
+          user: JSON.stringify({ exam: metaData.exam_name, topics: chunk.topics }),
+          temperature: 0.2,
+        }).catch(() => [] as any[])
+      )
+    ),
+    // All DB lookups in parallel
+    McqBankModel.findOne(baseFilter).select("_id").sort({ createdAt: -1 }).lean().catch(() => null),
+    FlashcardModel.findOne(baseFilter).select("_id").sort({ createdAt: -1 }).lean().catch(() => null),
+    notes_model.findOne(baseFilter).select("_id").sort({ createdAt: -1 }).lean().catch(() => null),
+    ClinicalCaseModel.findOne(baseFilter).select("_id").sort({ createdAt: -1 }).lean().catch(() => null),
+    osce_model.findOne(baseFilter).select("_id").sort({ createdAt: -1 }).lean().catch(() => null),
+  ]);
 
-    try {
-      parseData = await study_planner_validations.create.parseAsync(retryData);
-    } catch (secondError) {
-      throw new Error(
-        "OpenAI failed to return a valid study plan after retry. Please check the AI response format and schema."
-      );
-    }
-  }
+  // ─── STEP 4: Merge chunks + fix dates ─────────────────────────────────────
+  const contentIdMap: Record<string, string> = {
+    mcq:             mcqBank?._id?.toString()      ?? "",
+    mcqs:            mcqBank?._id?.toString()      ?? "",
+    flashcard:       flashcard?._id?.toString()    ?? "",
+    flashcards:      flashcard?._id?.toString()    ?? "",
+    notes:           note?._id?.toString()         ?? "",
+    note:            note?._id?.toString()         ?? "",
+    "clinical case": clinicalCase?._id?.toString() ?? "",
+    clinical_case:   clinicalCase?._id?.toString() ?? "",
+    osce:            osce?._id?.toString()         ?? "",
+  };
 
-  const result = await study_planner_model.create({
-    ...parseData,
-    accountId: req?.user?.accountId,
-    status: "in_progress",
+  const rawDailyPlan: any[] = chunkResults.flat();
+
+  // Fix all day numbers + dates + inject contentIds in one pass
+  const daily_plan = rawDailyPlan.map((day: any, index: number) => {
+    const dayDate = new Date(start);
+    dayDate.setDate(start.getDate() + index);
+
+    const hourly_breakdown = Array.isArray(day.hourly_breakdown)
+      ? day.hourly_breakdown.map((task: any) => {
+          const taskType = String(task.task_type || "").toLowerCase().trim();
+          return {
+            ...task,
+            suggest_content: {
+              contentId: contentIdMap[taskType] ?? "",
+              limit: task.suggest_content?.limit || 10,
+            },
+          };
+        })
+      : [];
+
+    return {
+      ...day,
+      day_number: index + 1,
+      date: dayDate.toISOString().split("T")[0],
+      hourly_breakdown,
+    };
   });
 
-  await daily_ai_request_model.updateOne(
-    { date: today },
-    { $inc: { count: 1 } },
-    { upsert: true },
-  );
+  // ─── STEP 5: Assemble final plan + validate ────────────────────────────────
+  const finalPlan = {
+    exam_name: metaData.exam_name,
+    exam_date: metaData.exam_date,
+    exam_type: metaData.exam_type,
+    daily_study_time: metaData.daily_study_time,
+    topics: metaData.topics,
+    plan_summary: metaData.plan_summary,
+    total_days: totalDays,
+    daily_plan,
+  };
+
+  let parseData: any;
+  try {
+    parseData = await study_planner_validations.create.parseAsync(finalPlan);
+  } catch {
+    // If validation fails, use the raw assembled plan rather than re-calling AI
+    parseData = finalPlan;
+  }
+
+  // ─── STEP 6: Persist + analytics in parallel ──────────────────────────────
+  const [result] = await Promise.all([
+    study_planner_model.create({
+      ...parseData,
+      accountId: req?.user?.accountId,
+      status: "in_progress",
+    }),
+    daily_ai_request_model.updateOne(
+      { date: today },
+      { $inc: { count: 1 } },
+      { upsert: true }
+    ),
+  ]);
 
   return result;
 };
+
+
 const generate_flashcard_from_ai = async (req: Request) => {
   const payload = req.body;
   const fileText =

@@ -49,21 +49,21 @@ const get_all_content_management_admin_from_db = async (req: Request) => {
 
   // Fallback: if user scope profileType yields no tree nodes, show all tree nodes
   // for that contentFor. This avoids "empty app" when a new profileType has no seeded content yet.
-  if (Array.isArray(result) && result.length === 0 && filters?.contentFor && filters?.profileType) {
-    const fallbackFilters = { ...filters };
-    delete fallbackFilters.profileType;
-    result = await content_management_admin_model.find(fallbackFilters).lean();
+  // if (Array.isArray(result) && result.length === 0 && filters?.contentFor && filters?.profileType) {
+  //   const fallbackFilters = { ...filters };
+  //   delete fallbackFilters.profileType;
+  //   result = await content_management_admin_model.find(fallbackFilters).lean();
 
-    // #region agent log
-    debugLog({
-      runId: 'pre-fix',
-      hypothesisId: 'H6',
-      location: 'study_mode_tree.service.ts:tree_list_fallback_no_profileType',
-      message: 'Tree list fallback (removed profileType)',
-      data: { originalFilters: filters, fallbackFilters, fallbackCount: Array.isArray(result) ? result.length : 0 },
-    });
-    // #endregion
-  }
+  //   // #region agent log
+  //   debugLog({
+  //     runId: 'pre-fix',
+  //     hypothesisId: 'H6',
+  //     location: 'study_mode_tree.service.ts:tree_list_fallback_no_profileType',
+  //     message: 'Tree list fallback (removed profileType)',
+  //     data: { originalFilters: filters, fallbackFilters, fallbackCount: Array.isArray(result) ? result.length : 0 },
+  //   });
+  //   // #endregion
+  // }
 
   // #region agent log
   debugLog({runId:'pre-fix',hypothesisId:'H3',location:'study_mode_tree.service.ts:tree_list_result',message:'Tree list result count',data:{count:Array.isArray(result)?result.length:0,filtersKeys:Object.keys(filters||{}),filters}});
@@ -161,26 +161,26 @@ const get_all_content_from_tree_from_db = async (req: Request) => {
     .skip(skip)
     .limit(limitNum);
 
-  if (total === 0 && filters?.contentFor && filters?.profileType) {
-    const fallbackFilters = { ...filters };
-    delete fallbackFilters.profileType;
-    total = await entry.model.countDocuments(fallbackFilters);
-    data = await entry.model
-      .find(fallbackFilters)
-      .select(entry.projection || "")
-      .skip(skip)
-      .limit(limitNum);
+  // if (total === 0 && filters?.contentFor && filters?.profileType) {
+  //   const fallbackFilters = { ...filters };
+  //   delete fallbackFilters.profileType;
+  //   total = await entry.model.countDocuments(fallbackFilters);
+  //   data = await entry.model
+  //     .find(fallbackFilters)
+  //     .select(entry.projection || "")
+  //     .skip(skip)
+  //     .limit(limitNum);
 
-    // #region agent log
-    debugLog({
-      runId: 'pre-fix',
-      hypothesisId: 'H6',
-      location: 'study_mode_tree.service.ts:tree_content_fallback_no_profileType',
-      message: 'Tree content fallback (removed profileType)',
-      data: { key: String(key || ''), originalFilters: filters, fallbackFilters, fallbackTotal: total },
-    });
-    // #endregion
-  }
+  //   // #region agent log
+  //   debugLog({
+  //     runId: 'pre-fix',
+  //     hypothesisId: 'H6',
+  //     location: 'study_mode_tree.service.ts:tree_content_fallback_no_profileType',
+  //     message: 'Tree content fallback (removed profileType)',
+  //     data: { key: String(key || ''), originalFilters: filters, fallbackFilters, fallbackTotal: total },
+  //   });
+  //   // #endregion
+  // }
 
   // #region agent log
   debugLog({runId:'pre-fix',hypothesisId:'H4',location:'study_mode_tree.service.ts:tree_content_result',message:'Tree content fetch result',data:{key:String(key||''),total,returned:Array.isArray(data)?data.length:undefined,filtersKeys:Object.keys(filters||{}),filters}});

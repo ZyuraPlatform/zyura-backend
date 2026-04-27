@@ -251,58 +251,57 @@ const get_all_mcq_banks = async (req: Request) => {
 
   // Safe fallback: if goal filter yields nothing and user didn't explicitly filter/search,
   // show all content for their profileType instead of a blank screen.
-  if (didApplyGoalFilter && !didUserSpecifyFilters && total === 0) {
-    result = await McqBankModel.aggregate([
-      { $match: filters },
-      { $sort: { createdAt: -1 } },
-      { $skip: skip },
-      { $limit: limitNumber },
-      {
-        $project: {
-          title: 1,
-          subject: 1,
-          system: 1,
-          topic: 1,
-          subtopic: 1,
-          uploadedBy: 1,
-          createdAt: 1,
-          contentFor: 1,
-          profileType: 1,
-          totalMcq: { $size: { $ifNull: ["$mcqs", []] } },
-        },
-      },
-    ]);
-    total = await McqBankModel.countDocuments(filters);
-  }
+  // if (didApplyGoalFilter && !didUserSpecifyFilters && total === 0) {
+  //   result = await McqBankModel.aggregate([
+  //     { $match: filters },
+  //     { $sort: { createdAt: -1 } },
+  //     { $skip: skip },
+  //     { $limit: limitNumber },
+  //     {
+  //       $project: {
+  //         title: 1,
+  //         subject: 1,
+  //         system: 1,
+  //         topic: 1,
+  //         subtopic: 1,
+  //         uploadedBy: 1,
+  //         createdAt: 1,
+  //         contentFor: 1,
+  //         profileType: 1,
+  //         totalMcq: { $size: { $ifNull: ["$mcqs", []] } },
+  //       },
+  //     },
+  //   ]);
+  //   total = await McqBankModel.countDocuments(filters);
+  // }
 
   // Safe fallback: if profileType filter yields nothing, show all content for the role's contentFor.
   // This matches the study-mode-tree behavior: if a new profileType has no seeded content yet,
   // we avoid an "empty app" by falling back to contentFor scope only.
-  if (!didUserSpecifyFilters && total === 0 && filters?.contentFor && filters?.profileType) {
-    const fallbackFilters = { ...filters };
-    delete fallbackFilters.profileType;
-    result = await McqBankModel.aggregate([
-      { $match: fallbackFilters },
-      { $sort: { createdAt: -1 } },
-      { $skip: skip },
-      { $limit: limitNumber },
-      {
-        $project: {
-          title: 1,
-          subject: 1,
-          system: 1,
-          topic: 1,
-          subtopic: 1,
-          uploadedBy: 1,
-          createdAt: 1,
-          contentFor: 1,
-          profileType: 1,
-          totalMcq: { $size: { $ifNull: ["$mcqs", []] } },
-        },
-      },
-    ]);
-    total = await McqBankModel.countDocuments(fallbackFilters);
-  }
+  // if (!didUserSpecifyFilters && total === 0 && filters?.contentFor && filters?.profileType) {
+  //   const fallbackFilters = { ...filters };
+  //   delete fallbackFilters.profileType;
+  //   result = await McqBankModel.aggregate([
+  //     { $match: fallbackFilters },
+  //     { $sort: { createdAt: -1 } },
+  //     { $skip: skip },
+  //     { $limit: limitNumber },
+  //     {
+  //       $project: {
+  //         title: 1,
+  //         subject: 1,
+  //         system: 1,
+  //         topic: 1,
+  //         subtopic: 1,
+  //         uploadedBy: 1,
+  //         createdAt: 1,
+  //         contentFor: 1,
+  //         profileType: 1,
+  //         totalMcq: { $size: { $ifNull: ["$mcqs", []] } },
+  //       },
+  //     },
+  //   ]);
+  //   total = await McqBankModel.countDocuments(fallbackFilters);
 
   return {
     meta: {

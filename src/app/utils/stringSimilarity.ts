@@ -316,7 +316,7 @@ export function findFuzzyDuplicatesFromIndex(
     const entry = index[i];
 
     // 1. Exact skip
-    if (normalized === entry.normalized) continue;
+    // if (normalized === entry.normalized) continue;
 
     // 2. Length prune — free O(1) gate
     if (Math.abs(normalized.length - entry.normalized.length) > 40) continue;
