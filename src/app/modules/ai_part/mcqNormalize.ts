@@ -1,6 +1,7 @@
 type McqOptionLabel = "A" | "B" | "C" | "D" | "E" | "F";
 
 const OPTION_LABELS: McqOptionLabel[] = ["A", "B", "C", "D", "E", "F"];
+const DEFAULT_SHUFFLE_LABELS: McqOptionLabel[] = ["A", "B", "C", "D", "E", "F"];
 
 const normalizeOptionLabel = (raw: unknown): McqOptionLabel | null => {
   if (raw === null || raw === undefined) return null;
@@ -119,5 +120,65 @@ export function normalizeMcqsWithStats(raw: any): { mcqs: any[]; dropped: number
 
 export function normalizeMcqs(raw: any) {
   return normalizeMcqsWithStats(raw).mcqs;
+}
+
+type NormalizedMcqOption = {
+  option: McqOptionLabel;
+  optionText: string;
+  explanation?: string;
+};
+
+type NormalizedMcq = {
+  mcqId: string;
+  difficulty: string;
+  question: string;
+  options: NormalizedMcqOption[];
+  correctOption: McqOptionLabel;
+};
+
+const shuffleInPlace = <T,>(arr: T[]) => {
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+};
+
+/**
+ * Randomizes option ordering while preserving which option is correct.
+ * This prevents AI outputs from always placing the correct answer at "A".
+ */
+export function shuffleAndRelabelMcqs(
+  mcqs: NormalizedMcq[],
+  labels: McqOptionLabel[] = DEFAULT_SHUFFLE_LABELS,
+) {
+  return (Array.isArray(mcqs) ? mcqs : []).map((m) => {
+    if (!m || !Array.isArray(m.options) || m.options.length < 2) return m;
+
+    const correctLabel = normalizeOptionLabel(m.correctOption) ?? null;
+    if (!correctLabel) return m;
+
+    const flagged = m.options.map((o) => ({
+      ...o,
+      __wasCorrect: String(o?.option ?? "") === String(correctLabel),
+    }));
+
+    shuffleInPlace(flagged);
+
+    const relabeled = flagged.map((o, idx) => ({
+      option: labels[idx] ?? (OPTION_LABELS[idx] as McqOptionLabel),
+      optionText: String(o.optionText ?? "").trim(),
+      explanation: o.explanation,
+      __wasCorrect: o.__wasCorrect,
+    }));
+
+    const correctNow = relabeled.find((o) => o.__wasCorrect)?.option ?? relabeled[0]?.option;
+
+    return {
+      ...m,
+      options: relabeled.map(({ __wasCorrect, ...rest }) => rest),
+      correctOption: correctNow,
+    };
+  });
 }
 

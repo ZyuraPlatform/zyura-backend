@@ -24,7 +24,7 @@ import { study_planner_model } from "../study_planner/study_planner.schema";
 import { study_planner_validations } from "../study_planner/study_planner.validation";
 import { openaiChatJson, openaiChatText } from "../../utils/openai";
 import { ai_tutor_thread_model } from "./ai_tutor.schema";
-import { normalizeMcqs, normalizeMcqsWithStats } from "./mcqNormalize";
+import { normalizeMcqs, normalizeMcqsWithStats, shuffleAndRelabelMcqs } from "./mcqNormalize";
 const today = new Date().toISOString().split("T")[0];
 
 type TutorCategory = "medical_exam" | "platform_help" | "writing_assist" | "other";
@@ -700,6 +700,10 @@ const generate_mcq_from_ai = async (req: Request) => {
     });
     ({ mcqs, dropped } = normalizeMcqsWithStats(repair));
   }
+
+  // Randomize option ordering + correctOption label (prevents always-"A" answers).
+  mcqs = shuffleAndRelabelMcqs(mcqs as any) as any;
+
   // Guarantee at least the correct option has an explanation (fallback fill).
   try {
     const missing = mcqs
@@ -800,6 +804,13 @@ const generate_clinical_case_from_ai = async (req: Request) => {
     temperature: 0.3,
   });
   // save it later
+  if (data?.clinical_case?.mcqs && Array.isArray(data.clinical_case.mcqs)) {
+    try {
+      data.clinical_case.mcqs = shuffleAndRelabelMcqs(data.clinical_case.mcqs as any) as any;
+    } catch {
+      // best-effort only
+    }
+  }
   const finalPayload: Partial<T_MyContent_mcq> = {
     ...data?.clinical_case,
     studentId: req?.user?.accountId,
@@ -935,6 +946,10 @@ const mcq_generator_from_ai = async (req: Request) => {
     });
     ({ mcqs, dropped } = normalizeMcqsWithStats(repair));
   }
+
+  // Randomize option ordering + correctOption label (prevents always-"A" answers).
+  mcqs = shuffleAndRelabelMcqs(mcqs as any) as any;
+
   const finalPayload: Partial<T_MyContent_mcq> = {
     title: payload?.quiz_name || data?.title,
     subject: payload?.subject,
@@ -1062,6 +1077,16 @@ const generate_recommendation_from_ai = async (req: Request) => {
           flashcards: null,
           notes: null,
         };
+
+  // Randomize recommended MCQ correctOption labels too.
+  try {
+    const recMcqs = normalizedData?.post_quiz_recommendations?.mcqs;
+    if (Array.isArray(recMcqs) && recMcqs.length && normalizedData.post_quiz_recommendations) {
+      normalizedData.post_quiz_recommendations.mcqs = shuffleAndRelabelMcqs(recMcqs as any) as any;
+    }
+  } catch {
+    // best-effort only
+  }
 
   // Ensure at least the correct option has an explanation for each recommended MCQ.
   try {
