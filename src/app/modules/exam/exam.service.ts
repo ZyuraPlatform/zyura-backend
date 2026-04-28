@@ -4,7 +4,7 @@ import { excelConverter } from "../../utils/excel_converter";
 import { isAccountExist } from "../../utils/isAccountExist";
 import {
   buildFlatIndex,
-  findFuzzyDuplicatesFromIndex,
+  findExactDuplicatesFromIndex,
 } from "../../utils/stringSimilarity";
 import { seededShuffle } from "../../utils/seededShuffle";
 import { ProfessionalModel } from "../professional/professional.schema";
@@ -545,6 +545,17 @@ const delete_specific_mcq_from_professional_exam_from_db = async (
 
 // ─── ✅ check_duplicate_question_in_exams — fully optimized ──────────────────
 
+// ─── ✅ check_duplicate_question_in_exams — EXACT match only ─────────────────
+// 
+// Checks for exact normalized question matches across:
+//   - Student exams (scoped by student type)
+//   - Professional exams (scoped by profession name)
+//   - MCQ banks (all accessible)
+//
+// SKIPS:
+//   - Self-matches (same exam + same mcqId)
+//   - Options (only checks question text)
+//
 const check_duplicate_question_in_exams = async (req: Request) => {
   const { question, excludeExamId, examType } = req.body;
 
@@ -601,18 +612,20 @@ const check_duplicate_question_in_exams = async (req: Request) => {
     excludeExamId,
   );
 
-  const duplicates = findFuzzyDuplicatesFromIndex(
-    question,
-    flatIndex,
-    0.85,
-    10,
+  // ── 6. Single EXACT match scan ────────────────────────────────────────────
+  //    Skip self-matches (same exam + same mcqId) by passing excludeExamId
+  const duplicates = findExactDuplicatesFromIndex(question, flatIndex, excludeExamId, undefined, 10);
+
+  // Filter out self-matches if any (safety net, though buildFlatIndex should handle excludeExamId)
+  const externalDuplicates = duplicates.filter(
+    (dup) => !(excludeExamId && (dup.examId === excludeExamId || dup.bankId === excludeExamId))
   );
 
   return {
-    hasDuplicates: duplicates.length > 0,
-    duplicates,
-    count: duplicates.length,
-    bestMatch: duplicates[0] ?? null,
+    hasDuplicates: externalDuplicates.length > 0,
+    duplicates: externalDuplicates,
+    count: externalDuplicates.length,
+    bestMatch: externalDuplicates[0] ?? null,
   };
 };
 

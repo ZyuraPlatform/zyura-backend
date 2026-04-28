@@ -8,7 +8,7 @@ import { getNormalizedContentScopeForAccount } from "../../utils/normalizeProfil
 import { seededShuffle } from "../../utils/seededShuffle";
 import {
   buildFlatIndex,
-  findFuzzyDuplicatesFromIndex,
+  findExactDuplicatesFromIndex,
 } from "../../utils/stringSimilarity";
 import { Account_Model } from "../auth/auth.schema";
 import { exam_model_professional, exam_model_student } from "../exam/exam.schema";
@@ -19,6 +19,7 @@ import {
   student_profile_type_const_model,
 } from "../profile_type_const/profile_type_const.schema";
 import { report_model } from "../report/report.schema";
+import { notifyAdminsOnNewReport } from "../report/report.notification";
 import { Student_Model } from "../student/student.schema";
 import { TMcqBank } from "./mcq_bank.interface";
 import { McqBankModel } from "./mcq_bank.schema";
@@ -526,7 +527,9 @@ const save_report_for_mcq_on_db = async (req: Request) => {
       text: req?.body?.text,
     },
   };
-  return await report_model.create(payload);
+  const createdReport = await report_model.create(payload);
+  notifyAdminsOnNewReport(createdReport.toObject());
+  return createdReport;
 };
 
 const save_manual_mcq_upload_into_db = async (req: Request) => {
@@ -621,14 +624,15 @@ const upload_existing_mcq_bank_more_questions_into_db = async (req: Request) => 
   return result?.modifiedCount;
 };
 
-// ─── ✅ check_duplicate_question — fully optimized ────────────────────────────
+// ─── ✅ check_duplicate_question — EXACT match only ────────────────────────────
 //
-// BEFORE: fetched all mcqs fields from every doc → ~18s
+// BEFORE: fuzzy matching (0.90 similarity) — fetched all mcqs fields from every doc → ~18s
 // AFTER:
 //   1. Projects ONLY _id + title/examName + mcqs.mcqId + mcqs.question
 //   2. Fetches banks, student exams, and professional exams in PARALLEL
 //   3. Builds ONE shared flat index across all sources
-//   4. Runs a single fuzzy scan over the combined index
+//   4. Runs a single EXACT match scan (1.0 similarity only)
+//   5. SKIPS self-matches (same bank + same mcqId)
 //
 const check_duplicate_question = async (req: Request) => {
   const { question, excludeBankId, contentFor, profileType } = req.body;
@@ -700,14 +704,19 @@ const check_duplicate_question = async (req: Request) => {
 
   const flatIndex = buildFlatIndex(combinedDocs as any, excludeBankId);
 
-  // ── 6. Single fuzzy scan over combined index ──────────────────────────────
-  const duplicates = findFuzzyDuplicatesFromIndex(question, flatIndex, 0.90, 10);
+  // ── 6. Single EXACT match scan over combined index ──────────────────────────
+  //    Skip self-matches (same bank + same mcqId) by passing excludeBankId
+  const duplicates = findExactDuplicatesFromIndex(question, flatIndex, excludeBankId, undefined, 10);
+  // Filter out self-matches if any (safety net, though buildFlatIndex should handle excludeBankId)
+  const externalDuplicates = duplicates.filter(
+    (dup) => !(excludeBankId && (dup.bankId === excludeBankId || dup.examId === excludeBankId))
+  );
 
   return {
-    hasDuplicates: duplicates.length > 0,
-    duplicates,
-    count: duplicates.length,
-    bestMatch: duplicates[0] ?? null,
+    hasDuplicates: externalDuplicates.length > 0,
+    duplicates: externalDuplicates,
+    count: externalDuplicates.length,
+    bestMatch: externalDuplicates[0] ?? null,
   };
 };
 

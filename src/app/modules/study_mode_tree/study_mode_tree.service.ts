@@ -1,6 +1,10 @@
 import { Request } from "express";
 import mongoose from "mongoose";
 import { AppError } from "../../utils/app_error";
+import {
+  buildFlatIndex,
+  findExactDuplicatesFromIndex,
+} from "../../utils/stringSimilarity";
 import { ClinicalCaseModel } from '../clinical_case/clinical_case.schema';
 import { FlashcardModel } from "../flash_card/flash_card.schema";
 import { McqBankModel } from "../mcq_bank/mcq_bank.schema";
@@ -8,9 +12,25 @@ import { notes_model } from "../notes/notes.schema";
 import { osce_model } from "../osce/osce.schema";
 import { ProfessionalModel } from "../professional/professional.schema";
 import { Student_Model } from "../student/student.schema";
+import { exam_model_professional, exam_model_student } from "../exam/exam.schema";
 import { content_management_admin_model } from './study_mode_tree.schema';
 import { getNormalizedContentScopeForAccount } from "../../utils/normalizeProfileType";
 import { debugLog } from "../../utils/debugLog";
+
+// ─── Minimal DB projections — only fields needed for duplicate detection ────────
+const DUPE_BANK_PROJECTION = {
+  _id: 1,
+  title: 1,
+  "mcqs.mcqId": 1,
+  "mcqs.question": 1,
+} as const;
+
+const DUPE_EXAM_PROJECTION = {
+  _id: 1,
+  examName: 1,
+  "mcqs.mcqId": 1,
+  "mcqs.question": 1,
+} as const;
 
 const create_new_content_management_admin_into_db = async (req: Request) => {
   const isSubjectExist = await content_management_admin_model.findOne({ subject: req?.body?.subjectName });
@@ -249,10 +269,103 @@ const delete_content_management_admin_from_db = async (req: Request) => {
   }
 };
 
+// ─── ✅ check_duplicate_question_in_study_mode — EXACT match only ──────────────
+//
+// Checks for exact normalized question matches across:
+//   - MCQ banks (accessible to the user based on their scope)
+//   - Student exams (scoped by student type)
+//   - Professional exams (scoped by profession name)
+//
+// SKIPS:
+//   - Self-matches (same bank/exam + same mcqId)
+//   - Options (only checks question text)
+//
+const check_duplicate_question_in_study_mode = async (req: Request) => {
+  const { question, excludeBankId, contentFor, profileType } = req.body;
+
+  if (!question || typeof question !== "string") {
+    throw new AppError("Question text is required", 400);
+  }
+
+  // ── 1. Build DB filters for banks ────────────────────────────────────────
+  const bankFilters: Record<string, any> = {};
+  if (contentFor) bankFilters.contentFor = contentFor;
+  if (profileType) bankFilters.profileType = profileType;
+
+  // ── 2. Determine exam scope from role ────────────────────────────────────
+  let studentExamFilter: Record<string, any> = {};
+  let professionalExamFilter: Record<string, any> = {};
+
+  if (req?.user?.role === "STUDENT") {
+    const student = await Student_Model.findOne(
+      { accountId: req?.user?.accountId },
+      { studentType: 1 },
+    ).lean();
+    if (student?.studentType) {
+      studentExamFilter = { profileType: student.studentType };
+    }
+  } else if (req?.user?.role === "PROFESSIONAL") {
+    const professional = await ProfessionalModel.findOne(
+      { accountId: req?.user?.accountId },
+      { professionName: 1 },
+    ).lean();
+    if (professional?.professionName) {
+      professionalExamFilter = { professionName: professional.professionName };
+    }
+  }
+  // Admin: empty filters → fetch all
+
+  // ── 3. Fetch all sources IN PARALLEL with minimal projection ───────────────
+  const [allBanks, studentExams, professionalExams] = await Promise.all([
+    McqBankModel.find(bankFilters, DUPE_BANK_PROJECTION).lean(),
+    exam_model_student.find(studentExamFilter, DUPE_EXAM_PROJECTION).lean(),
+    exam_model_professional.find(professionalExamFilter, DUPE_EXAM_PROJECTION).lean(),
+  ]);
+
+  // ── 4. Normalise exam docs to match McqDocument shape ────────────────────
+  const studentExamDocs = (studentExams as any[]).map((e) => ({
+    _id: e._id,
+    examName: e.examName,
+    mcqs: e.mcqs ?? [],
+  }));
+
+  const professionalExamDocs = (professionalExams as any[]).map((e) => ({
+    _id: e._id,
+    examName: e.examName,
+    mcqs: e.mcqs ?? [],
+  }));
+
+  // ── 5. Build ONE flat index from ALL sources combined ────────────────────
+  const combinedDocs = [
+    ...allBanks,
+    ...studentExamDocs,
+    ...professionalExamDocs,
+  ];
+
+  const flatIndex = buildFlatIndex(combinedDocs as any, excludeBankId);
+
+  // ── 6. Single EXACT match scan ────────────────────────────────────────────
+  //    Skip self-matches (same bank/exam + same mcqId) by passing excludeBankId
+  const duplicates = findExactDuplicatesFromIndex(question, flatIndex, excludeBankId, undefined, 10);
+
+  // Filter out self-matches if any (safety net, though buildFlatIndex should handle excludeBankId)
+  const externalDuplicates = duplicates.filter(
+    (dup) => !(excludeBankId && (dup.bankId === excludeBankId || dup.examId === excludeBankId))
+  );
+
+  return {
+    hasDuplicates: externalDuplicates.length > 0,
+    duplicates: externalDuplicates,
+    count: externalDuplicates.length,
+    bestMatch: externalDuplicates[0] ?? null,
+  };
+};
+
 export const study_mode_tree_service = {
   create_new_content_management_admin_into_db,
   get_all_content_management_admin_from_db,
   update_content_management_admin_into_db,
   delete_content_management_admin_from_db,
-  get_all_content_from_tree_from_db
+  get_all_content_from_tree_from_db,
+  check_duplicate_question_in_study_mode,
 };

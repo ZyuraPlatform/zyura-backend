@@ -7,7 +7,7 @@ import { jwtHelpers } from "./app/utils/JWT";
 // accountId => { socketId, loginTime }
 export const onlineUsers = new Map<
   string,
-  { socketId: string; loginTime: number }
+  { accountId: string; loginTime: number; role: string }
 >();
 
 let io: Server;
@@ -75,11 +75,13 @@ export function setupSocket(_io: Server) {
       if (!verifiedUser?.email || !verifiedUser?.accountId) return;
 
       // ⏱ session start
-      onlineUsers.set(verifiedUser.accountId, {
-        socketId: socket.id,
+      onlineUsers.set(socket.id, {
+        accountId: verifiedUser.accountId,
         loginTime: Date.now(),
-      });
+        role: verifiedUser.role || "",
 
+      });
+       console.log(`User connected - socketId: ${socket.id}, accountId: ${verifiedUser.accountId}, role: ${verifiedUser.role}`);
       const today = getDhakaDateStr(new Date());
 
       // ✅ daily bucket ensure
@@ -87,9 +89,9 @@ export function setupSocket(_io: Server) {
 
       socket.on("disconnect", async () => {
         try {
-          const userData = onlineUsers.get(verifiedUser.accountId);
+          const userData = onlineUsers.get(socket.id);
           if (!userData) {
-            onlineUsers.delete(verifiedUser.accountId);
+            onlineUsers.delete(socket.id);
             return;
           }
 
@@ -211,14 +213,14 @@ export function setupSocket(_io: Server) {
               });
           }
 
-          onlineUsers.delete(verifiedUser.accountId);
+          onlineUsers.delete(socket.id);
           io.emit("presence", {
-            accountId: verifiedUser.accountId,
+            accountId: userData.accountId,
             online: false,
           });
         } catch (err) {
           console.error("disconnect error:", err);
-          onlineUsers.delete(verifiedUser.accountId);
+          onlineUsers.delete(socket.id);
         }
       });
     } catch (err) {

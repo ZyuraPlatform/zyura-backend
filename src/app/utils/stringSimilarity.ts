@@ -364,6 +364,74 @@ export function findFuzzyDuplicates(
 }
 
 /**
+ * Find EXACT question matches from a pre-built flat index.
+ * 
+ * CRITICAL: Skips self-matches where BOTH bankId/examId AND mcqId are identical.
+ * This prevents flagging the same question (from same bank/exam) as a duplicate.
+ *
+ * @param question    The question text to search for
+ * @param index       Pre-built flat index
+ * @param excludeBankId Optional bank/exam ID to exclude from results
+ * @param excludeMcqId  Optional mcqId to exclude (self-match when combined with excludeBankId)
+ * @param limit       Max results to return
+ * @returns Exact matches with exact similarity (1.0)
+ */
+export function findExactDuplicatesFromIndex(
+  question: string,
+  index: FlatEntry[],
+  excludeBankId?: string,
+  excludeMcqId?: string,
+  limit = 10,
+): SimilarMatch[] {
+  const normalized = normalizeQuestion(question);
+  if (!isQualityQuestion(normalized)) return [];
+
+  const candidates: SimilarMatch[] = [];
+
+  for (let i = 0; i < index.length; i++) {
+    const entry = index[i];
+
+    // Skip if it's an exact self-match: same bankId/examId AND same mcqId
+    if (excludeBankId && excludeMcqId) {
+      const isSameBank = (entry.bankId === excludeBankId || entry.examId === excludeBankId);
+      const isSameMcq = entry.mcqId === excludeMcqId;
+      if (isSameBank && isSameMcq) continue;
+    }
+
+    // Check for exact normalized match
+    if (normalized === entry.normalized) {
+      candidates.push({
+        similarity: 1.0, // Exact match
+        mcqId: entry.mcqId,
+        bankName: entry.bankName,
+        examName: entry.examName,
+        question: entry.question,
+        bankId: entry.bankId,
+        examId: entry.examId,
+      });
+    }
+  }
+
+  return candidates.slice(0, limit);
+}
+
+/**
+ * Convenience wrapper for exact duplicate finding — builds the flat index internally.
+ * Use findExactDuplicatesFromIndex() when processing multiple questions against
+ * the same document set.
+ */
+export function findExactDuplicates(
+  question: string,
+  documents: McqDocument[],
+  excludeId?: string,
+  excludeMcqId?: string,
+  limit = 10,
+): SimilarMatch[] {
+  const index = buildFlatIndex(documents, excludeId);
+  return findExactDuplicatesFromIndex(question, index, excludeId, excludeMcqId, limit);
+}
+
+/**
  * Backward-compatible bulk exact-match duplicate finder.
  * Checks each question in the input array against all others by normalized
  * string equality. O(n) — does NOT use Jaro-Winkler.
