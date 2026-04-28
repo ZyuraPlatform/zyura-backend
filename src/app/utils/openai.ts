@@ -69,21 +69,36 @@ export async function openaiChatText(opts: {
   }
 
   const model = configs?.openai?.model || "gpt-4o-mini";
+  const timeoutMs = Number((configs as any)?.openai?.timeout_ms) || 120000;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
-  const res = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model,
-      messages: opts.messages,
-      temperature: typeof opts.temperature === "number" ? opts.temperature : 0.2,
-    }),
-  });
-
-  const text = await res.text();
+  let res: Response;
+  let text: string;
+  try {
+    res = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model,
+        messages: opts.messages,
+        temperature:
+          typeof opts.temperature === "number" ? opts.temperature : 0.2,
+      }),
+      signal: controller.signal,
+    });
+    text = await res.text();
+  } catch (e: any) {
+    if (e?.name === "AbortError") {
+      throw new Error(`OpenAI request timed out after ${timeoutMs}ms`);
+    }
+    throw e;
+  } finally {
+    clearTimeout(timeout);
+  }
   if (!res.ok) {
     // Avoid leaking secrets; only return a short upstream body snippet.
     throw new Error(`OpenAI error ${res.status}: ${text.slice(0, 400)}`);

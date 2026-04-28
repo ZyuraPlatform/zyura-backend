@@ -5,8 +5,11 @@ import { study_planner_model } from "./study_planner.schema";
 
 const get_all_study_plan_from_db = async (req: Request) => {
   const accountId = req?.user?.accountId;
+  const created_from = String(req?.query?.created_from || "").trim();
+  const query: Record<string, any> = { accountId };
+  if (created_from) query.created_from = created_from;
   const result = await study_planner_model
-    .find({ accountId })
+    .find(query)
     .sort("-createdAt")
     .lean();
   return result;

@@ -459,15 +459,34 @@ Rules:
 
   const contentForFilter = payload.contentFor || "student";
   const profileTypeFilter = payload.profileType;
-  const defaultTopic = topics[0] || {};
 
-  const baseFilter: Record<string, any> = {};
-  if (contentForFilter) baseFilter.contentFor = contentForFilter;
-  if (profileTypeFilter) baseFilter.profileType = profileTypeFilter;
-  if (defaultTopic.subject) baseFilter.subject = defaultTopic.subject;
-  if (defaultTopic.system) baseFilter.system = defaultTopic.system;
-  if (defaultTopic.topic) baseFilter.topic = defaultTopic.topic;
-  if (defaultTopic.subtopic) baseFilter.subtopic = defaultTopic.subtopic;
+  const topicKey = (t: any) =>
+    [
+      String(t?.subject ?? ""),
+      String(t?.system ?? ""),
+      String(t?.topic ?? ""),
+      String(t?.subtopic ?? ""),
+    ].join("__");
+
+  // Unique topic tuples from metadata (used to resolve contentIds per topic)
+  const uniqueTopics = Array.from(
+    new Map(
+      topics
+        .filter((t) => t && typeof t === "object")
+        .map((t) => [topicKey(t), t]),
+    ).values(),
+  );
+
+  const buildFilterForTopic = (t: any): Record<string, any> => {
+    const f: Record<string, any> = {};
+    if (contentForFilter) f.contentFor = contentForFilter;
+    if (profileTypeFilter) f.profileType = profileTypeFilter;
+    if (t?.subject) f.subject = t.subject;
+    if (t?.system) f.system = t.system;
+    if (t?.topic) f.topic = t.topic;
+    if (t?.subtopic) f.subtopic = t.subtopic;
+    return f;
+  };
 
   const dailyPlanChunkPrompt = (chunk: typeof chunks[0]) => `
 You are a medical study plan generator for the Zyura platform.
@@ -501,7 +520,7 @@ Mix task types across days. Return ONLY the JSON array. No markdown.
 `.trim();
 
   // ─── STEP 3: Run all chunk AI calls + DB queries in parallel ──────────────
-  const [chunkResults, mcqBank, flashcard, note, clinicalCase, osce] = await Promise.all([
+  const [chunkResults, topicContentIndex] = await Promise.all([
     // All daily_plan chunks generated simultaneously
     Promise.all(
       chunks.map((chunk) =>
@@ -512,26 +531,37 @@ Mix task types across days. Return ONLY the JSON array. No markdown.
         }).catch(() => [] as any[])
       )
     ),
-    // All DB lookups in parallel
-    McqBankModel.findOne(baseFilter).select("_id").sort({ createdAt: -1 }).lean().catch(() => null),
-    FlashcardModel.findOne(baseFilter).select("_id").sort({ createdAt: -1 }).lean().catch(() => null),
-    notes_model.findOne(baseFilter).select("_id").sort({ createdAt: -1 }).lean().catch(() => null),
-    ClinicalCaseModel.findOne(baseFilter).select("_id").sort({ createdAt: -1 }).lean().catch(() => null),
-    osce_model.findOne(baseFilter).select("_id").sort({ createdAt: -1 }).lean().catch(() => null),
+    // Resolve content IDs per unique topic tuple (multi-topic correctness)
+    Promise.all(
+      uniqueTopics.map(async (t: any) => {
+        const f = buildFilterForTopic(t);
+        const [mcqBank, flashcard, note, clinicalCase, osce] = await Promise.all([
+          McqBankModel.findOne(f).select("_id").sort({ createdAt: -1 }).lean().catch(() => null),
+          FlashcardModel.findOne(f).select("_id").sort({ createdAt: -1 }).lean().catch(() => null),
+          notes_model.findOne(f).select("_id").sort({ createdAt: -1 }).lean().catch(() => null),
+          ClinicalCaseModel.findOne(f).select("_id").sort({ createdAt: -1 }).lean().catch(() => null),
+          osce_model.findOne(f).select("_id").sort({ createdAt: -1 }).lean().catch(() => null),
+        ]);
+
+        return {
+          key: topicKey(t),
+          ids: {
+            mcq: mcqBank?._id?.toString() ?? "",
+            flashcard: flashcard?._id?.toString() ?? "",
+            note: note?._id?.toString() ?? "",
+            clinical_case: clinicalCase?._id?.toString() ?? "",
+            osce: osce?._id?.toString() ?? "",
+          },
+        };
+      }),
+    ),
   ]);
 
   // ─── STEP 4: Merge chunks + fix dates ─────────────────────────────────────
-  const contentIdMap: Record<string, string> = {
-    mcq:             mcqBank?._id?.toString()      ?? "",
-    mcqs:            mcqBank?._id?.toString()      ?? "",
-    flashcard:       flashcard?._id?.toString()    ?? "",
-    flashcards:      flashcard?._id?.toString()    ?? "",
-    notes:           note?._id?.toString()         ?? "",
-    note:            note?._id?.toString()         ?? "",
-    "clinical case": clinicalCase?._id?.toString() ?? "",
-    clinical_case:   clinicalCase?._id?.toString() ?? "",
-    osce:            osce?._id?.toString()         ?? "",
-  };
+  const contentIndex = new Map<string, any>();
+  for (const row of topicContentIndex || []) {
+    if (row?.key) contentIndex.set(String(row.key), row.ids || {});
+  }
 
   const rawDailyPlan: any[] = chunkResults.flat();
 
@@ -540,13 +570,33 @@ Mix task types across days. Return ONLY the JSON array. No markdown.
     const dayDate = new Date(start);
     dayDate.setDate(start.getDate() + index);
 
+    const topicForDay = topics.length
+      ? topics[index % topics.length]
+      : null;
+    const idsForDay =
+      topicForDay ? (contentIndex.get(topicKey(topicForDay)) ?? {}) : {};
+
     const hourly_breakdown = Array.isArray(day.hourly_breakdown)
       ? day.hourly_breakdown.map((task: any) => {
           const taskType = String(task.task_type || "").toLowerCase().trim();
+          const normalizedType =
+            taskType === "mcqs" ? "mcq" :
+            taskType === "flashcards" ? "flashcard" :
+            taskType === "notes" ? "note" :
+            taskType === "note" ? "note" :
+            taskType === "clinical case" || taskType === "clinical_case" ? "clinical_case" :
+            taskType === "osce" ? "osce" :
+            taskType;
           return {
             ...task,
             suggest_content: {
-              contentId: contentIdMap[taskType] ?? "",
+              contentId:
+                normalizedType === "mcq" ? (idsForDay.mcq ?? "") :
+                normalizedType === "flashcard" ? (idsForDay.flashcard ?? "") :
+                normalizedType === "note" ? (idsForDay.note ?? "") :
+                normalizedType === "clinical_case" ? (idsForDay.clinical_case ?? "") :
+                normalizedType === "osce" ? (idsForDay.osce ?? "") :
+                "",
               limit: task.suggest_content?.limit || 10,
             },
           };
@@ -586,6 +636,10 @@ Mix task types across days. Return ONLY the JSON array. No markdown.
     study_planner_model.create({
       ...parseData,
       accountId: req?.user?.accountId,
+      created_from:
+        payload?.created_from === "smart_study_planner"
+          ? "smart_study_planner"
+          : "smart_study",
       status: "in_progress",
     }),
     daily_ai_request_model.updateOne(

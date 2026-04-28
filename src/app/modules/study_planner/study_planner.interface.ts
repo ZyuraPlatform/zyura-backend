@@ -1,5 +1,6 @@
 export type T_StudyPlanner = {
   accountId: string;
+  created_from?: "smart_study" | "smart_study_planner";
   plan_summary: string;
   total_days: number;
   daily_plan: {
