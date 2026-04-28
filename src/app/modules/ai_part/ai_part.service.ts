@@ -459,15 +459,28 @@ Rules:
 
   const contentForFilter = payload.contentFor || "student";
   const profileTypeFilter = payload.profileType;
-  const defaultTopic = topics[0] || {};
 
+  // Base filter that applies to all content lookups.
+  // Topic filters are applied via $or across ALL selected topics so multi-topic plans
+  // don't accidentally use only topics[0].
   const baseFilter: Record<string, any> = {};
   if (contentForFilter) baseFilter.contentFor = contentForFilter;
   if (profileTypeFilter) baseFilter.profileType = profileTypeFilter;
-  if (defaultTopic.subject) baseFilter.subject = defaultTopic.subject;
-  if (defaultTopic.system) baseFilter.system = defaultTopic.system;
-  if (defaultTopic.topic) baseFilter.topic = defaultTopic.topic;
-  if (defaultTopic.subtopic) baseFilter.subtopic = defaultTopic.subtopic;
+
+  const topicOrFilters = Array.isArray(topics)
+    ? topics
+        .filter((t) => t && typeof t === "object")
+        .map((t) => ({
+          ...(t.subject ? { subject: t.subject } : {}),
+          ...(t.system ? { system: t.system } : {}),
+          ...(t.topic ? { topic: t.topic } : {}),
+          ...(t.subtopic ? { subtopic: t.subtopic } : {}),
+        }))
+        .filter((t) => Object.keys(t).length > 0)
+    : [];
+
+  const contentLookupFilter =
+    topicOrFilters.length > 0 ? { ...baseFilter, $or: topicOrFilters } : baseFilter;
 
   const dailyPlanChunkPrompt = (chunk: typeof chunks[0]) => `
 You are a medical study plan generator for the Zyura platform.
@@ -513,11 +526,11 @@ Mix task types across days. Return ONLY the JSON array. No markdown.
       )
     ),
     // All DB lookups in parallel
-    McqBankModel.findOne(baseFilter).select("_id").sort({ createdAt: -1 }).lean().catch(() => null),
-    FlashcardModel.findOne(baseFilter).select("_id").sort({ createdAt: -1 }).lean().catch(() => null),
-    notes_model.findOne(baseFilter).select("_id").sort({ createdAt: -1 }).lean().catch(() => null),
-    ClinicalCaseModel.findOne(baseFilter).select("_id").sort({ createdAt: -1 }).lean().catch(() => null),
-    osce_model.findOne(baseFilter).select("_id").sort({ createdAt: -1 }).lean().catch(() => null),
+    McqBankModel.findOne(contentLookupFilter).select("_id").sort({ createdAt: -1 }).lean().catch(() => null),
+    FlashcardModel.findOne(contentLookupFilter).select("_id").sort({ createdAt: -1 }).lean().catch(() => null),
+    notes_model.findOne(contentLookupFilter).select("_id").sort({ createdAt: -1 }).lean().catch(() => null),
+    ClinicalCaseModel.findOne(contentLookupFilter).select("_id").sort({ createdAt: -1 }).lean().catch(() => null),
+    osce_model.findOne(contentLookupFilter).select("_id").sort({ createdAt: -1 }).lean().catch(() => null),
   ]);
 
   // ─── STEP 4: Merge chunks + fix dates ─────────────────────────────────────
@@ -586,6 +599,8 @@ Mix task types across days. Return ONLY the JSON array. No markdown.
     study_planner_model.create({
       ...parseData,
       accountId: req?.user?.accountId,
+      plan_type: payload?.plan_type || "preference",
+      goalId: payload?.goalId,
       status: "in_progress",
     }),
     daily_ai_request_model.updateOne(

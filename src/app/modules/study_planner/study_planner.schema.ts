@@ -51,6 +51,12 @@ const DailyPlanEntrySchema = new Schema<IDailyPlanEntry>(
 const study_planner_schema = new Schema<T_StudyPlanner>(
   {
     accountId: { type: String, required: true },
+    plan_type: {
+      type: String,
+      enum: ["preference", "smart"],
+      default: "preference",
+    },
+    goalId: { type: String },
     plan_summary: String,
     total_days: Number,
     daily_plan: [DailyPlanEntrySchema],

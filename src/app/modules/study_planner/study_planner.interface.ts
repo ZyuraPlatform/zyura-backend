@@ -1,5 +1,7 @@
 export type T_StudyPlanner = {
   accountId: string;
+  plan_type?: "preference" | "smart";
+  goalId?: string;
   plan_summary: string;
   total_days: number;
   daily_plan: {
@@ -10,7 +12,11 @@ export type T_StudyPlanner = {
     hourly_breakdown: {
       task_type: string;
       description: string;
-      suggest_content: string[];
+      duration_minutes?: number;
+      suggest_content?: {
+        contentId: string;
+        limit: number;
+      };
       duration_hours: number;
       isCompleted: boolean;
     }[];

@@ -5,8 +5,20 @@ import { study_planner_model } from "./study_planner.schema";
 
 const get_all_study_plan_from_db = async (req: Request) => {
   const accountId = req?.user?.accountId;
+  const { plan_type, goalId } = (req.query || {}) as {
+    plan_type?: string;
+    goalId?: string;
+  };
+
+  const filter: Record<string, any> = { accountId };
+  if (plan_type === "preference" || plan_type === "smart") {
+    filter.plan_type = plan_type;
+  }
+  if (goalId) {
+    filter.goalId = String(goalId);
+  }
   const result = await study_planner_model
-    .find({ accountId })
+    .find(filter)
     .sort("-createdAt")
     .lean();
   return result;

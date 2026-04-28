@@ -10,12 +10,15 @@ const study_planner = z.object({
     exam_date: z.string(),
     exam_type: z.string(),
     daily_study_time: z.number(),
+    start_date: z.string().optional(),
+    plan_type: z.enum(["preference", "smart"]).optional(),
+    goalId: z.string().optional(),
     topics: z.array(
         z.object({
             subject: z.string(),
             system: z.string(),
             topic: z.string(),
-            subtopic: z.string(),
+            subtopic: z.string().optional().default(""),
         })
     ),
 });

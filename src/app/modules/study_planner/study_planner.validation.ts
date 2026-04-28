@@ -1,6 +1,8 @@
 import { z } from "zod";
 
 const create = z.object({
+  plan_type: z.enum(["preference", "smart"]).optional(),
+  goalId: z.string().optional(),
   plan_summary: z.string(),
   total_days: z.number(),
   daily_plan: z.array(
