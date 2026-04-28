@@ -632,16 +632,38 @@ Mix task types across days. Return ONLY the JSON array. No markdown.
   }
 
   // ─── STEP 6: Persist + analytics in parallel ──────────────────────────────
+  const created_from =
+    payload?.created_from === "smart_study_planner"
+      ? "smart_study_planner"
+      : "smart_study";
+
+  const persistPlan =
+    created_from === "smart_study_planner"
+      ? // Planner should be a single updatable plan per account
+        study_planner_model
+          .findOneAndUpdate(
+            { accountId: req?.user?.accountId, created_from: "smart_study_planner" },
+            {
+              $set: {
+                ...parseData,
+                accountId: req?.user?.accountId,
+                created_from: "smart_study_planner",
+                status: "in_progress",
+              },
+            },
+            { upsert: true, new: true },
+          )
+          .lean()
+      : // Smart Study (Preference) can create new plans
+        study_planner_model.create({
+          ...parseData,
+          accountId: req?.user?.accountId,
+          created_from: "smart_study",
+          status: "in_progress",
+        });
+
   const [result] = await Promise.all([
-    study_planner_model.create({
-      ...parseData,
-      accountId: req?.user?.accountId,
-      created_from:
-        payload?.created_from === "smart_study_planner"
-          ? "smart_study_planner"
-          : "smart_study",
-      status: "in_progress",
-    }),
+    persistPlan,
     daily_ai_request_model.updateOne(
       { date: today },
       { $inc: { count: 1 } },
