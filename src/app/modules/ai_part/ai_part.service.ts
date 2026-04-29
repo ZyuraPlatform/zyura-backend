@@ -506,7 +506,11 @@ const buildDeterministicHourlyBreakdown = (
 
 // ai_part.service.ts — replace generate_new_study_plan_from_ai
 
-const generate_new_study_plan_from_ai = async (req: Request) => {
+/**
+ * Runs AI + deterministic assembly for a study plan (steps 1–5).
+ * Does not persist. Used by create and by study_planner update/regenerate.
+ */
+const build_study_plan_payload_from_ai_request = async (req: Request) => {
   const isAccount = await isAccountExist(req?.user?.email as string, "profile_id") as any;
   const payload = req?.body;
 
@@ -776,6 +780,12 @@ Return ONLY the JSON array. No markdown.
     // If validation fails, use the raw assembled plan rather than re-calling AI
     parseData = finalPlan;
   }
+
+  return { parseData, startDate, payload };
+};
+
+const generate_new_study_plan_from_ai = async (req: Request) => {
+  const { parseData, startDate, payload } = await build_study_plan_payload_from_ai_request(req);
 
   // ─── STEP 6: Persist + analytics in parallel ──────────────────────────────
   const created_from =
@@ -1463,6 +1473,7 @@ export const ai_part_service = {
   chat_with_ai_tutor_from_ai,
   get_all_chat_history_from_ai,
   get_all_chat_thread_title_from_ai,
+  build_study_plan_payload_from_ai_request,
   generate_new_study_plan_from_ai,
   generate_flashcard_from_ai,
   generate_mcq_from_ai,

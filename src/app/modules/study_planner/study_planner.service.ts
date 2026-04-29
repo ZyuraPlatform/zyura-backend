@@ -1,7 +1,79 @@
 import { Request } from "express";
 import { Types } from "mongoose";
 import { AppError } from "../../utils/app_error";
+import { daily_ai_request_model } from "../analytics/analytics.schema";
+import { ai_part_service } from "../ai_part/ai_part.service";
 import { study_planner_model } from "./study_planner.schema";
+
+const todayStr = () => new Date().toISOString().split("T")[0];
+
+type TaskProgressFields = {
+  isCompleted?: boolean;
+  attempted_count?: number;
+  total_count?: number;
+  attempts?: unknown;
+};
+
+const taskProgressKey = (dateStr: string, taskType: string, contentId: string) => {
+  const d = String(dateStr ?? "").includes("T")
+    ? String(dateStr).split("T")[0]
+    : String(dateStr);
+  return `${d}|${String(taskType ?? "").toLowerCase()}|${String(contentId ?? "")}`;
+};
+
+const buildProgressMap = (oldDaily: unknown): Map<string, TaskProgressFields> => {
+  const m = new Map<string, TaskProgressFields>();
+  const days = Array.isArray(oldDaily) ? oldDaily : [];
+  for (const day of days as any[]) {
+    const dateStr = day?.date;
+    for (const t of day?.hourly_breakdown ?? []) {
+      const sc = t?.suggest_content;
+      const cid =
+        sc && typeof sc === "object" && "contentId" in sc
+          ? String((sc as { contentId?: string }).contentId ?? "")
+          : "";
+      const key = taskProgressKey(String(dateStr), String(t?.task_type ?? ""), cid);
+      m.set(key, {
+        isCompleted: t?.isCompleted === true,
+        attempted_count: t?.attempted_count,
+        total_count: t?.total_count,
+        attempts: t?.attempts,
+      });
+    }
+  }
+  return m;
+};
+
+const mergeDailyPlanProgress = (oldDaily: unknown, newDaily: unknown[]): any[] => {
+  const progressByKey = buildProgressMap(oldDaily);
+  return newDaily.map((day: any) => {
+    const dateStr = day?.date;
+    const nextBreakdown = (day?.hourly_breakdown ?? []).map((t: any) => {
+      const sc = t?.suggest_content;
+      const cid =
+        sc && typeof sc === "object" && "contentId" in sc
+          ? String((sc as { contentId?: string }).contentId ?? "")
+          : "";
+      const key = taskProgressKey(String(dateStr), String(t?.task_type ?? ""), cid);
+      const saved = progressByKey.get(key);
+      if (!saved) return { ...t };
+      const merged = { ...t };
+      if (saved.isCompleted !== undefined) merged.isCompleted = saved.isCompleted;
+      if (saved.attempted_count !== undefined) merged.attempted_count = saved.attempted_count;
+      if (saved.total_count !== undefined) merged.total_count = saved.total_count;
+      if (saved.attempts !== undefined) merged.attempts = saved.attempts;
+      return merged;
+    });
+    const isDayCompleted =
+      nextBreakdown.length > 0 &&
+      nextBreakdown.every((x: any) => x.isCompleted === true);
+    return {
+      ...day,
+      hourly_breakdown: nextBreakdown,
+      isCompleted: isDayCompleted,
+    };
+  });
+};
 
 const get_all_study_plan_from_db = async (req: Request) => {
   const accountId = req?.user?.accountId;
@@ -318,6 +390,82 @@ const get_single_study_plan_from_db = async (req: Request) => {
   return result;
 };
 
+const update_study_plan_in_db = async (req: Request) => {
+  const { planId } = req.params as { planId: string };
+  const accountId = req?.user?.accountId;
+
+  if (!planId || !accountId) {
+    throw new AppError("Invalid request", 400);
+  }
+
+  const existing = await study_planner_model
+    .findOne({ _id: new Types.ObjectId(planId), accountId })
+    .lean();
+
+  if (!existing) {
+    throw new AppError("Study plan not found", 404);
+  }
+
+  const { parseData, startDate } =
+    await ai_part_service.build_study_plan_payload_from_ai_request(req);
+
+  const mergedDaily = mergeDailyPlanProgress(
+    existing.daily_plan,
+    parseData.daily_plan as unknown[],
+  );
+
+  const allDaysCompleted =
+    mergedDaily.length > 0 &&
+    mergedDaily.every(
+      (d: any) =>
+        Array.isArray(d.hourly_breakdown) &&
+        d.hourly_breakdown.length > 0 &&
+        d.hourly_breakdown.every((t: any) => t.isCompleted === true),
+    );
+
+  const planTitle = String(
+    req.body?.title ??
+      req.body?.exam_name ??
+      parseData?.exam_name ??
+      "Study plan",
+  )
+    .trim()
+    .slice(0, 120);
+
+  const updated = await study_planner_model
+    .findOneAndUpdate(
+      { _id: new Types.ObjectId(planId), accountId },
+      {
+        $set: {
+          title: planTitle || existing.title,
+          exam_name: parseData.exam_name ?? req.body?.exam_name,
+          exam_date: parseData.exam_date ?? req.body?.exam_date,
+          exam_type: parseData.exam_type ?? req.body?.exam_type ?? "",
+          start_date: startDate,
+          daily_study_time: Number(
+            parseData.daily_study_time ?? req.body?.daily_study_time ?? 0,
+          ),
+          topics: parseData.topics ?? req.body?.topics,
+          plan_summary: parseData.plan_summary,
+          total_days: parseData.total_days,
+          daily_plan: mergedDaily,
+          selection_snapshot: req.body?.selection_snapshot,
+          status: allDaysCompleted ? "completed" : "in_progress",
+        },
+      },
+      { new: true },
+    )
+    .lean();
+
+  await daily_ai_request_model.updateOne(
+    { date: todayStr() },
+    { $inc: { count: 1 } },
+    { upsert: true },
+  );
+
+  return updated;
+};
+
 // ─── Add to the exported object ───────────────────────────────────────────
 export const study_planner_service = {
   get_all_study_plan_from_db,
@@ -326,4 +474,5 @@ export const study_planner_service = {
   save_mcq_attempts_into_db,
   cancel_study_plan_from_db,
   delete_study_plan_from_db,
+  update_study_plan_in_db,
 };
