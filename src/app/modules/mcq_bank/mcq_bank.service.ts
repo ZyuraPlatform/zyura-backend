@@ -80,55 +80,98 @@ const upload_bulk_mcq_bank_into_db = async (req: Request) => {
     ? excelConverter.parseFile(req.file.path) || []
     : [];
 
-  const refineData = excelData.map((item: TRawMcqRow, idx: number) => {
-    const options = [
-      {
-        option: "A" as const,
-        optionText: item.optionA || "",
-        explanation: item.explanationA || undefined,
-      },
-      {
-        option: "B" as const,
-        optionText: item.optionB || "",
-        explanation: item.explanationB || undefined,
-      },
-      {
-        option: "C" as const,
-        optionText: item.optionC || "",
-        explanation: item.explanationC || undefined,
-      },
-      {
-        option: "D" as const,
-        optionText: item.optionD || "",
-        explanation: item.explanationD || undefined,
-      },
-      {
-        option: "E" as const,
-        optionText: item.optionE || "",
-        explanation: item.explanationE || undefined,
-      },
-      {
-        option: "F" as const,
-        optionText: item.optionF || "",
-        explanation: item.explanationF || undefined,
-      },
-    ].filter((opt) => opt?.optionText !== ""); // 🧹 remove empty options
-
-    return {
-      difficulty: item?.difficulty?.trim(),
-      question: item?.question,
-      imageDescription: item?.imageDescription || undefined,
-      options,
-      correctOption: item?.correctOption?.trim()?.toUpperCase() as
-        | "A"
-        | "B"
-        | "C"
-        | "D"
-        | "E"
-        | "F",
-      mcqId: `MCQ-${String(idx + 1).padStart(6, "0")}`,
-    };
+const refineData: any[] = [];
+for (let idx = 0; idx < excelData.length; idx++) {
+  const item = excelData[idx];
+  console.log(`Row ${idx + 1} keys:`, Object.keys(item));
+  const questionKey = item.Question || item.question || item['Question'] || '';
+  if (!questionKey || typeof questionKey !== 'string' || !questionKey.trim()) {
+    console.warn(`Skipping row ${idx + 1}: missing/invalid question (tried keys: Question, question)`);
+    continue;
+  }
+  
+  const rawOptions = [
+    { text: item['Option A'] || '', exp: item['Explanation A'] || '' },
+    { text: item['Option B'] || '', exp: item['Explanation B'] || '' },
+    { text: item['Option C'] || '', exp: item['Explanation C'] || '' },
+    { text: item['Option D'] || '', exp: item['Explanation D'] || '' },
+    { text: item['Option E'] || '', exp: item['Explanation E'] || '' },
+    { text: item['Option F'] || '', exp: item['Explanation F'] || '' }
+  ];
+  
+  const options = rawOptions
+    .map(({ text, exp }, i) => ({
+      option: ['A', 'B', 'C', 'D', 'E', 'F'][i] as "A" | "B" | "C" | "D" | "E" | "F",
+      optionText: text.trim(),
+      explanation: exp.trim() || undefined
+    }))
+    .filter(opt => opt.optionText);
+  
+  if (options.length < 2) {
+    console.warn(`Skipping row ${idx + 1}: less than 2 options (${options.length})`);
+    continue;
+  }
+  
+  const correctOpt = (item['Correct Option'] || item.correctOption || '').toString().trim().toUpperCase();
+  console.log(`Row ${idx + 1} correctOpt: "${correctOpt}"`);
+  if (!['A','B','C','D','E','F'].includes(correctOpt)) {
+    console.warn(`Skipping row ${idx + 1}: invalid correctOption '${correctOpt}'`);
+    continue;
+  }
+  
+  refineData.push({
+    difficulty: (item.Difficulty || item.difficulty || 'Basic').toString().trim(),
+    question: questionKey.trim(),
+    imageDescription: item.imageDescription?.toString().trim() || undefined,
+    options,
+    correctOption: correctOpt as 'A' | 'B' | 'C' | 'D' | 'E' | 'F',
+    mcqId: `MCQ-${String(idx + 1).padStart(6, '0')}`
   });
+}
+
+console.log(`Processed ${refineData.length}/${excelData.length} valid MCQs`);
+if (refineData.length === 0) {
+  return {
+    success: false,
+    message: 'No valid MCQs found in uploaded file. Please check CSV format and ensure each row has Question, at least 2 Options (A/B/C/D), and valid Correct Option (A-F). See RequiredColumnsList.',
+    processed: 0,
+    skipped: excelData.length,
+    sampleColumns: Object.keys(excelData[0] || {})
+  };
+}
+
+  // Check for duplicates
+  const questions = refineData.map(mcq => mcq.question);
+  const duplicateCheckResult = await checkBulkDuplicates({
+    body: {
+      questions,
+      contentFor: body?.contentFor,
+      profileType: body?.profileType,
+    },
+    user: req.user,
+  } as Request);
+
+  // Filter out duplicates
+  const nonDuplicateMcqs = refineData.filter((mcq, index) => {
+    const dupes = duplicateCheckResult.duplicates as Record<number, any[]>;
+    const hasDuplicates = dupes[index]?.length > 0;
+    if (hasDuplicates) {
+      console.log(`Skipping duplicate MCQ at index ${index}: ${mcq.question.substring(0, 50)}...`);
+    }
+    return !hasDuplicates;
+  });
+
+  const duplicatesSkipped = refineData.length - nonDuplicateMcqs.length;
+
+  if (nonDuplicateMcqs.length === 0) {
+    return {
+      success: false,
+      message: 'All MCQs in the uploaded file are duplicates. No new questions were added.',
+      processed: 0,
+      skipped: excelData.length + duplicatesSkipped,
+      duplicatesSkipped,
+    };
+  }
   const uploadedBy = [
     isUserExist?.profile_id?.firstName,
     isUserExist?.profile_id?.lastName,
@@ -141,7 +184,7 @@ const upload_bulk_mcq_bank_into_db = async (req: Request) => {
     contentFor: body?.contentFor,
     profileType: body?.profileType,
     uploadedBy,
-    mcqs: refineData,
+    mcqs: nonDuplicateMcqs,
     subject: body?.subject,
     system: body?.system,
     topic: body?.topic,
@@ -166,7 +209,13 @@ const upload_bulk_mcq_bank_into_db = async (req: Request) => {
     );
   }
 
-  return Array.isArray(result) ? result.length : 1;
+  return {
+    success: true,
+    message: `MCQ bank uploaded successfully. ${nonDuplicateMcqs.length} questions added, ${duplicatesSkipped} duplicates skipped.`,
+    processed: nonDuplicateMcqs.length,
+    skipped: excelData.length - refineData.length + duplicatesSkipped,
+    duplicatesSkipped,
+  };
 };
 
 const get_all_mcq_banks = async (req: Request) => {
@@ -616,12 +665,50 @@ const upload_existing_mcq_bank_more_questions_into_db = async (req: Request) => 
     }));
   }
 
+  // Check for duplicates
+  const questions = payload.map(mcq => mcq.question);
+  const duplicateCheckResult = await checkBulkDuplicates({
+    body: {
+      questions,
+      contentFor: existingMcqBank.contentFor,
+      profileType: existingMcqBank.profileType,
+      excludeBankId: bankId,
+    },
+    user: req.user,
+  } as Request);
+
+  // Filter out duplicates
+  const nonDuplicateMcqs = payload.filter((mcq, index) => {
+    const dupes = duplicateCheckResult.duplicates as Record<number, any[]>;
+    const hasDuplicates = dupes[index]?.length > 0;
+    if (hasDuplicates) {
+      console.log(`Skipping duplicate MCQ at index ${index}: ${mcq.question.substring(0, 50)}...`);
+    }
+    return !hasDuplicates;
+  });
+
+  const duplicatesSkipped = payload.length - nonDuplicateMcqs.length;
+
+  if (nonDuplicateMcqs.length === 0) {
+    return {
+      success: false,
+      message: 'All MCQs in the uploaded file are duplicates. No new questions were added.',
+      added: 0,
+      duplicatesSkipped,
+    };
+  }
+
   const result = await McqBankModel.updateOne(
     { _id: bankId },
-    { $push: { mcqs: { $each: payload } } },
+    { $push: { mcqs: { $each: nonDuplicateMcqs } } },
   );
 
-  return result?.modifiedCount;
+  return {
+    success: true,
+    message: `Added ${nonDuplicateMcqs.length} questions to MCQ bank, ${duplicatesSkipped} duplicates skipped.`,
+    added: nonDuplicateMcqs.length,
+    duplicatesSkipped,
+  };
 };
 
 // ─── ✅ check_duplicate_question — EXACT match only ────────────────────────────
@@ -635,6 +722,7 @@ const upload_existing_mcq_bank_more_questions_into_db = async (req: Request) => 
 //   5. SKIPS self-matches (same bank + same mcqId)
 //
 const check_duplicate_question = async (req: Request) => {
+
   const { question, excludeBankId, contentFor, profileType } = req.body;
 
   if (!question || typeof question !== "string") {
@@ -720,6 +808,93 @@ const check_duplicate_question = async (req: Request) => {
   };
 };
 
+/**
+ * 🚀 BULK duplicate check — PERF OPTIMIZED
+ * Builds ONE flat index for ALL questions (vs N indexes for N questions)
+ * Returns Record<questionIndex, SimilarMatch[]> for frontend table row mapping
+ */
+const checkBulkDuplicates = async (req: Request) => {
+  const { questions, excludeBankId, contentFor, profileType } = req.body;
+
+  if (!Array.isArray(questions) || questions.length === 0) {
+    throw new AppError("Questions array is required and cannot be empty", 400);
+  }
+  if (questions.length > 500) {
+    throw new AppError("Too many questions (max 500 per batch)", 400);
+  }
+
+  // Early quality filter — skip trivial questions
+  const validQuestions = questions
+    .map((q, index) => ({ question: q as string, index }))
+    .filter(({ question }) => typeof question === 'string' && question.trim().length > 10);
+
+  if (validQuestions.length === 0) {
+    return { duplicates: {}, hasDuplicates: false, totalChecked: 0 };
+  }
+
+  // ── REUSE exact same DB logic/index build from single check ───────────────
+  const bankFilters: Record<string, any> = {};
+  if (contentFor) bankFilters.contentFor = contentFor;
+  if (profileType) bankFilters.profileType = profileType;
+
+  let studentExamFilter: Record<string, any> = {};
+  let professionalExamFilter: Record<string, any> = {};
+
+  if (req?.user?.role === "STUDENT") {
+    const student = await Student_Model.findOne(
+      { accountId: req?.user?.accountId },
+      { studentType: 1 },
+    ).lean();
+    if (student?.studentType) studentExamFilter = { profileType: student.studentType };
+  } else if (req?.user?.role === "PROFESSIONAL") {
+    const professional = await ProfessionalModel.findOne(
+      { accountId: req?.user?.accountId },
+      { professionName: 1 },
+    ).lean();
+    if (professional?.professionName) professionalExamFilter = { professionName: professional.professionName };
+  }
+
+  const [allBanks, studentExams, professionalExams] = await Promise.all([
+    McqBankModel.find(bankFilters, DUPE_BANK_PROJECTION).lean(),
+    exam_model_student.find(studentExamFilter, DUPE_EXAM_PROJECTION).lean(),
+    exam_model_professional.find(professionalExamFilter, DUPE_EXAM_PROJECTION).lean(),
+  ]);
+
+  const studentExamDocs = (studentExams as any[]).map((e) => ({
+    _id: e._id, examName: e.examName, mcqs: e.mcqs ?? [],
+  }));
+  const professionalExamDocs = (professionalExams as any[]).map((e) => ({
+    _id: e._id, examName: e.examName, mcqs: e.mcqs ?? [],
+  }));
+
+  const combinedDocs = [...allBanks, ...studentExamDocs, ...professionalExamDocs];
+  const flatIndex = buildFlatIndex(combinedDocs as any, excludeBankId);
+
+  // ── PARALLEL exact matches over shared index (cached norms!) ─────────────
+  const duplicatePromises = validQuestions.map(({ question, index }) =>
+    findExactDuplicatesFromIndex(question, flatIndex, excludeBankId, undefined, 5)
+      .filter(dup => !(excludeBankId && (dup.bankId === excludeBankId || dup.examId === excludeBankId)))
+  );
+
+  const allDuplicates = await Promise.all(duplicatePromises);
+
+  const duplicates: Record<number, any[]> = {};
+  validQuestions.forEach(({ index }, i) => {
+    duplicates[index] = allDuplicates[i];
+  });
+
+  const totalDuplicates = allDuplicates.reduce((sum, dups) => sum + dups.length, 0);
+  const hasDuplicates = totalDuplicates > 0;
+
+  return {
+    duplicates,  // { 0: [...], 2: [...] } — frontend table rowIndex → dupes
+    hasDuplicates,
+    totalChecked: validQuestions.length,
+    totalDuplicates,
+    skipped: questions.length - validQuestions.length,  // too short
+  };
+};
+
 export const mcq_bank_service = {
   upload_bulk_mcq_bank_into_db,
   get_all_mcq_banks,
@@ -733,4 +908,5 @@ export const mcq_bank_service = {
   upload_existing_mcq_bank_more_questions_into_db,
   get_all_mcq_banks_public_from_db,
   check_duplicate_question,
+  checkBulkDuplicates,
 };

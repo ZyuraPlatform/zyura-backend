@@ -7,9 +7,9 @@ import { mcq_bank_service } from "./mcq_bank.service";
 const upload_bulk_mcq_bank = catchAsync(async (req, res) => {
     const result = await mcq_bank_service.upload_bulk_mcq_bank_into_db(req);
     manageResponse(res, {
-        statusCode: 201,
-        success: true,
-        message: "MCQ bank uploaded successfully",
+        statusCode: result.success ? 201 : 200,
+        success: result.success,
+        message: result.message,
         data: result,
     });
 });
@@ -106,9 +106,9 @@ const delete_single_mcq = catchAsync(async (req, res) => {
 const upload_existing_mcq_bank_more_questions = catchAsync(async (req, res) => {
     const result = await mcq_bank_service.upload_existing_mcq_bank_more_questions_into_db(req);
     manageResponse(res, {
-        statusCode: 200,
-        success: true,
-        message: "MCQ bank updated successfully",
+        statusCode: result.success ? 200 : 200,
+        success: result.success,
+        message: result.message,
         data: result,
     });
 });
@@ -132,6 +132,17 @@ const check_duplicate = catchAsync(async (req: Request, res: Response) => {
   });
 });
 
+// 🚀 NEW: Bulk duplicate check endpoint (optimized for CSV preview)
+const check_bulk_duplicates = catchAsync(async (req: Request, res: Response) => {
+  const result = await mcq_bank_service.checkBulkDuplicates(req);
+  manageResponse(res, {
+    statusCode: 200,
+    success: true,
+    message: "Bulk duplicate check completed",
+    data: result,
+  });
+});
+
 export const mcq_bank_controller = {
     upload_bulk_mcq_bank,
     get_all_mcq_banks,
@@ -144,5 +155,6 @@ export const mcq_bank_controller = {
     get_specific_mcq_bank_with_index,
     upload_existing_mcq_bank_more_questions,
     get_all_mcq_banks_public,
-    check_duplicate
+    check_duplicate,
+    check_bulk_duplicates
 };
