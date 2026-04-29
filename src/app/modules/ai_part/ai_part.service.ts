@@ -409,36 +409,83 @@ const descriptionForKey = (
   return `${title} — ${topicLabel}`;
 };
 
+type TaskIdAndCap = { id: string; cap: number };
+
+const emptyPerTask = (): Record<DeterministicTaskKey, TaskIdAndCap> => ({
+  mcq: { id: "", cap: 0 },
+  flashcard: { id: "", cap: 0 },
+  clinical_case: { id: "", cap: 0 },
+  note: { id: "", cap: 0 },
+});
+
+/**
+ * Equal time slice per task type, count = floor(slice/rate) capped by bank capacity.
+ * Leftover seconds spill to other types (cheapest rate first) until caps or leftover < min rate.
+ */
 const buildDeterministicHourlyBreakdown = (
-  idsForDay: Record<string, string>,
+  perTask: Record<DeterministicTaskKey, TaskIdAndCap>,
   dailyStudyHours: number,
   topicLabel: string,
 ): { hourly_breakdown: any[]; total_hours: number } => {
   const safeHours =
     Number.isFinite(dailyStudyHours) && dailyStudyHours > 0 ? dailyStudyHours : 4;
-  const dailySecondsTotal = safeHours * 3600;
-  const sliceSeconds = dailySecondsTotal / DAILY_MIX.length;
+  const dailySec = safeHours * 3600;
+  const sliceSec = dailySec / DAILY_MIX.length;
+
+  const counts: Record<DeterministicTaskKey, number> = {
+    mcq: 0,
+    flashcard: 0,
+    clinical_case: 0,
+    note: 0,
+  };
+
+  for (const key of DAILY_MIX) {
+    const rate = TASK_RATES_SECONDS[key];
+    const cap = perTask[key]?.cap ?? 0;
+    const raw = Math.floor(sliceSec / rate);
+    counts[key] = Math.min(Math.max(0, raw), cap);
+  }
+
+  let used = DAILY_MIX.reduce(
+    (s, k) => s + counts[k] * TASK_RATES_SECONDS[k],
+    0,
+  );
+  let leftover = Math.max(0, dailySec - used);
+
+  const orderByRate = [...DAILY_MIX].sort(
+    (a, b) => TASK_RATES_SECONDS[a] - TASK_RATES_SECONDS[b],
+  );
+
+  let guard = 0;
+  const MAX_SPILL = 500000;
+  while (leftover > 0 && guard < MAX_SPILL) {
+    guard += 1;
+    let progressed = false;
+    for (const k of orderByRate) {
+      const rate = TASK_RATES_SECONDS[k];
+      const cap = perTask[k]?.cap ?? 0;
+      if (counts[k] >= cap) continue;
+      if (leftover < rate) continue;
+      counts[k] += 1;
+      leftover -= rate;
+      progressed = true;
+    }
+    if (!progressed) break;
+  }
 
   const hourly_breakdown: any[] = [];
   let totalSecondsAll = 0;
 
   for (const key of DAILY_MIX) {
     const rate = TASK_RATES_SECONDS[key];
-    const limit = Math.max(1, Math.floor(sliceSeconds / rate));
+    const limit = counts[key];
     const totalSeconds = limit * rate;
     totalSecondsAll += totalSeconds;
 
     const duration_hours = Math.floor(totalSeconds / 3600);
     const duration_minutes = Math.round((totalSeconds % 3600) / 60);
 
-    const contentId =
-      key === "mcq"
-        ? (idsForDay.mcq ?? "")
-        : key === "flashcard"
-          ? (idsForDay.flashcard ?? "")
-          : key === "note"
-            ? (idsForDay.note ?? "")
-            : (idsForDay.clinical_case ?? "");
+    const contentId = perTask[key]?.id ?? "";
 
     hourly_breakdown.push({
       task_type: taskTypeStringForKey(key),
@@ -620,32 +667,53 @@ Return ONLY the JSON array. No markdown.
     Promise.all(
       uniqueTopics.map(async (t: any) => {
         const f = buildFilterForTopic(t);
-        const [mcqBank, flashcard, note, clinicalCase, osce] = await Promise.all([
-          McqBankModel.findOne(f).select("_id").sort({ createdAt: -1 }).lean().catch(() => null),
-          FlashcardModel.findOne(f).select("_id").sort({ createdAt: -1 }).lean().catch(() => null),
+        const [mcqBank, flashcard, note, clinicalCase] = await Promise.all([
+          McqBankModel.findOne(f)
+            .select("_id mcqs")
+            .sort({ createdAt: -1 })
+            .lean()
+            .catch(() => null),
+          FlashcardModel.findOne(f)
+            .select("_id flashCards")
+            .sort({ createdAt: -1 })
+            .lean()
+            .catch(() => null),
           notes_model.findOne(f).select("_id").sort({ createdAt: -1 }).lean().catch(() => null),
           ClinicalCaseModel.findOne(f).select("_id").sort({ createdAt: -1 }).lean().catch(() => null),
-          osce_model.findOne(f).select("_id").sort({ createdAt: -1 }).lean().catch(() => null),
         ]);
+
+        const mb = mcqBank as { _id?: unknown; mcqs?: unknown[] } | null;
+        const fc = flashcard as { _id?: unknown; flashCards?: unknown[] } | null;
 
         return {
           key: topicKey(t),
-          ids: {
-            mcq: mcqBank?._id?.toString() ?? "",
-            flashcard: flashcard?._id?.toString() ?? "",
-            note: note?._id?.toString() ?? "",
-            clinical_case: clinicalCase?._id?.toString() ?? "",
-            osce: osce?._id?.toString() ?? "",
-          },
+          perTask: {
+            mcq: {
+              id: mb?._id?.toString() ?? "",
+              cap: Array.isArray(mb?.mcqs) ? mb.mcqs.length : 0,
+            },
+            flashcard: {
+              id: fc?._id?.toString() ?? "",
+              cap: Array.isArray(fc?.flashCards) ? fc.flashCards.length : 0,
+            },
+            note: {
+              id: note?._id?.toString() ?? "",
+              cap: note ? 1 : 0,
+            },
+            clinical_case: {
+              id: clinicalCase?._id?.toString() ?? "",
+              cap: clinicalCase ? 1 : 0,
+            },
+          } satisfies Record<DeterministicTaskKey, TaskIdAndCap>,
         };
       }),
     ),
   ]);
 
   // ─── STEP 4: Merge chunks + fix dates ─────────────────────────────────────
-  const contentIndex = new Map<string, any>();
+  const contentIndex = new Map<string, Record<DeterministicTaskKey, TaskIdAndCap>>();
   for (const row of topicContentIndex || []) {
-    if (row?.key) contentIndex.set(String(row.key), row.ids || {});
+    if (row?.key) contentIndex.set(String(row.key), row.perTask ?? emptyPerTask());
   }
 
   const rawDailyPlanFlat: any[] = chunkResults.flat();
@@ -660,13 +728,13 @@ Return ONLY the JSON array. No markdown.
     const topicForDay = topics.length
       ? topics[index % topics.length]
       : null;
-    const idsForDay = topicForDay
-      ? (contentIndex.get(topicKey(topicForDay)) ?? {})
-      : {};
+    const perTask = topicForDay
+      ? (contentIndex.get(topicKey(topicForDay)) ?? emptyPerTask())
+      : emptyPerTask();
 
     const topicLabel = formatTopicLabel(topicForDay);
     const { hourly_breakdown, total_hours } = buildDeterministicHourlyBreakdown(
-      idsForDay,
+      perTask,
       dailyStudyHoursNum,
       topicLabel,
     );
