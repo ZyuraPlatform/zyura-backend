@@ -359,6 +359,104 @@ const get_all_chat_thread_title_from_ai = async (req: Request) => {
   return data;
 };
 
+/**
+ * Smart study plan: AI returns topics per day only. Backend computes each task's
+ * `limit` and `duration_*` deterministically; `contentId` is resolved from DB
+ * (McqBank, Flashcard, ClinicalCase, Notes) per topic tuple.
+ */
+const TASK_RATES_SECONDS = {
+  mcq: 40,
+  flashcard: 180,
+  clinical_case: 300,
+  note: 900,
+} as const;
+
+type DeterministicTaskKey = keyof typeof TASK_RATES_SECONDS;
+
+const DAILY_MIX: readonly DeterministicTaskKey[] = [
+  "mcq",
+  "flashcard",
+  "clinical_case",
+  "note",
+];
+
+const formatTopicLabel = (t: any): string => {
+  if (!t || typeof t !== "object") return "General";
+  const parts = [t.subject, t.system, t.topic, t.subtopic]
+    .map((x) => String(x ?? "").trim())
+    .filter(Boolean);
+  return parts.length ? parts.join(" · ") : "General";
+};
+
+const taskTypeStringForKey = (key: DeterministicTaskKey): string => {
+  if (key === "clinical_case") return "clinical case";
+  if (key === "note") return "note";
+  return key;
+};
+
+const descriptionForKey = (
+  key: DeterministicTaskKey,
+  topicLabel: string,
+): string => {
+  const title =
+    key === "mcq"
+      ? "MCQ"
+      : key === "flashcard"
+        ? "Flashcards"
+        : key === "clinical_case"
+          ? "Clinical case"
+          : "Notes";
+  return `${title} — ${topicLabel}`;
+};
+
+const buildDeterministicHourlyBreakdown = (
+  idsForDay: Record<string, string>,
+  dailyStudyHours: number,
+  topicLabel: string,
+): { hourly_breakdown: any[]; total_hours: number } => {
+  const safeHours =
+    Number.isFinite(dailyStudyHours) && dailyStudyHours > 0 ? dailyStudyHours : 4;
+  const dailySecondsTotal = safeHours * 3600;
+  const sliceSeconds = dailySecondsTotal / DAILY_MIX.length;
+
+  const hourly_breakdown: any[] = [];
+  let totalSecondsAll = 0;
+
+  for (const key of DAILY_MIX) {
+    const rate = TASK_RATES_SECONDS[key];
+    const limit = Math.max(1, Math.floor(sliceSeconds / rate));
+    const totalSeconds = limit * rate;
+    totalSecondsAll += totalSeconds;
+
+    const duration_hours = Math.floor(totalSeconds / 3600);
+    const duration_minutes = Math.round((totalSeconds % 3600) / 60);
+
+    const contentId =
+      key === "mcq"
+        ? (idsForDay.mcq ?? "")
+        : key === "flashcard"
+          ? (idsForDay.flashcard ?? "")
+          : key === "note"
+            ? (idsForDay.note ?? "")
+            : (idsForDay.clinical_case ?? "");
+
+    hourly_breakdown.push({
+      task_type: taskTypeStringForKey(key),
+      description: descriptionForKey(key, topicLabel),
+      duration_hours,
+      duration_minutes,
+      suggest_content: {
+        contentId,
+        limit,
+      },
+      isCompleted: false,
+    });
+  }
+
+  const total_hours = Math.round((totalSecondsAll / 3600) * 100) / 100;
+  return { hourly_breakdown, total_hours };
+};
+
 // ai_part.service.ts — replace generate_new_study_plan_from_ai
 
 const generate_new_study_plan_from_ai = async (req: Request) => {
@@ -494,30 +592,16 @@ You are a medical study plan generator for the Zyura platform.
 
 Generate ONLY the daily_plan entries for days ${chunk.fromDay} to ${chunk.toDay} (dates ${chunk.fromDate} to ${chunk.toDate}).
 
-Return a JSON array (not wrapped in an object):
-[
-  {
-    "day_number": <number>,
-    "date": "<YYYY-MM-DD>",
-    "total_hours": <number>,
-    "topics": ["<topic string>"],
-    "hourly_breakdown": [
-      {
-        "task_type": "<one of: mcq, flashcard, notes, clinical case, osce>",
-        "description": "<task title mentioning subject/topic>",
-        "duration_hours": <number>,
-        "duration_minutes": <number>,
-        "suggest_content": { "contentId": "", "limit": 10 },
-        "isCompleted": false
-      }
-    ],
-    "isCompleted": false
-  }
-]
+Return a JSON array (not wrapped in an object). Each element MUST have ONLY:
+- "day_number": <number>,
+- "date": "<YYYY-MM-DD>",
+- "topics": ["<short topic focus strings for that day>"]
+
+Do NOT include hourly_breakdown, durations, or suggest_content limits — the server builds exactly four tasks per day (MCQ, flashcards, clinical case, notes) with computed time and item counts.
 
 Topics to cover in this chunk: ${JSON.stringify(chunk.topics)}
-Daily study time: ${enrichedInput.daily_study_time || 4} hours/day
-Mix task types across days. Return ONLY the JSON array. No markdown.
+Daily study time context (hours/day): ${enrichedInput.daily_study_time || 4}
+Return ONLY the JSON array. No markdown.
 `.trim();
 
   // ─── STEP 3: Run all chunk AI calls + DB queries in parallel ──────────────
@@ -564,51 +648,44 @@ Mix task types across days. Return ONLY the JSON array. No markdown.
     if (row?.key) contentIndex.set(String(row.key), row.ids || {});
   }
 
-  const rawDailyPlan: any[] = chunkResults.flat();
+  const rawDailyPlanFlat: any[] = chunkResults.flat();
+  const dailyStudyHoursNum =
+    Number(enrichedInput.daily_study_time ?? metaData.daily_study_time ?? 4) || 4;
 
-  // Fix all day numbers + dates + inject contentIds in one pass
-  const daily_plan = rawDailyPlan.map((day: any, index: number) => {
+  const daily_plan = Array.from({ length: totalDays }, (_, index) => {
     const dayDate = new Date(start);
     dayDate.setDate(start.getDate() + index);
 
+    const dayFromAi = rawDailyPlanFlat[index] || {};
     const topicForDay = topics.length
       ? topics[index % topics.length]
       : null;
-    const idsForDay =
-      topicForDay ? (contentIndex.get(topicKey(topicForDay)) ?? {}) : {};
+    const idsForDay = topicForDay
+      ? (contentIndex.get(topicKey(topicForDay)) ?? {})
+      : {};
 
-    const hourly_breakdown = Array.isArray(day.hourly_breakdown)
-      ? day.hourly_breakdown.map((task: any) => {
-          const taskType = String(task.task_type || "").toLowerCase().trim();
-          const normalizedType =
-            taskType === "mcqs" ? "mcq" :
-            taskType === "flashcards" ? "flashcard" :
-            taskType === "notes" ? "note" :
-            taskType === "note" ? "note" :
-            taskType === "clinical case" || taskType === "clinical_case" ? "clinical_case" :
-            taskType === "osce" ? "osce" :
-            taskType;
-          return {
-            ...task,
-            suggest_content: {
-              contentId:
-                normalizedType === "mcq" ? (idsForDay.mcq ?? "") :
-                normalizedType === "flashcard" ? (idsForDay.flashcard ?? "") :
-                normalizedType === "note" ? (idsForDay.note ?? "") :
-                normalizedType === "clinical_case" ? (idsForDay.clinical_case ?? "") :
-                normalizedType === "osce" ? (idsForDay.osce ?? "") :
-                "",
-              limit: task.suggest_content?.limit || 10,
-            },
-          };
-        })
-      : [];
+    const topicLabel = formatTopicLabel(topicForDay);
+    const { hourly_breakdown, total_hours } = buildDeterministicHourlyBreakdown(
+      idsForDay,
+      dailyStudyHoursNum,
+      topicLabel,
+    );
+
+    const topicsStrings: string[] =
+      Array.isArray(dayFromAi.topics) && dayFromAi.topics.length
+        ? dayFromAi.topics.map((x: any) => String(x))
+        : topicForDay
+          ? [formatTopicLabel(topicForDay)]
+          : [];
 
     return {
-      ...day,
+      ...dayFromAi,
       day_number: index + 1,
       date: dayDate.toISOString().split("T")[0],
+      total_hours,
+      topics: topicsStrings,
       hourly_breakdown,
+      isCompleted: false,
     };
   });
 
@@ -770,7 +847,9 @@ const generate_mcq_from_ai = async (req: Request) => {
         "Return ONLY valid JSON: {\"mcqs\":[{mcqId,difficulty,question,options:[{option,optionText,explanation}],correctOption}]}",
         "- difficulty: Basic|Intermediate|Advance",
         "- correctOption: A|B|C|D|E|F",
-        "- For EACH option provide a short explanation (1–2 sentences) why it is correct/incorrect.",
+        "- For EACH option provide 3–5 sentences: (1) why this option is correct/incorrect, (2) mechanism/pathophysiology/pharmacology rationale, (3) one clinical pearl or differentiator vs other options.",
+        "- For the CORRECT option, end with a one-line key takeaway.",
+        "- Do not be repetitive across options. Use exam-grade clinical wording. Avoid filler.",
       ].join("\n"),
     user: JSON.stringify(payload),
     temperature: 0.3,
@@ -829,7 +908,7 @@ const generate_mcq_from_ai = async (req: Request) => {
         system: [
           "Fill in missing explanations for the correct option only.",
           "Return ONLY JSON: {\"items\":[{\"key\":\"...\",\"correctExplanation\":\"...\"}]}",
-          "Rules: 1-3 sentences, clinically accurate, no extra keys.",
+          "Rules: 3-5 sentences, clinically accurate: rationale, mechanism/pearl, then a one-line key takeaway at the end. No extra keys.",
         ].join("\n"),
         user: JSON.stringify({ items: missing }),
         temperature: 0,
@@ -1017,7 +1096,9 @@ const mcq_generator_from_ai = async (req: Request) => {
         "- options must be labeled A-D (or A-F if needed).",
         "- difficulty: Basic|Intermediate|Advance",
         "- correctOption: A|B|C|D|E|F",
-        "- For EACH option provide a short explanation (1–2 sentences) why it is correct/incorrect.",
+        "- For EACH option provide 3–5 sentences: (1) why this option is correct/incorrect, (2) mechanism/pathophysiology/pharmacology rationale, (3) one clinical pearl or differentiator vs other options.",
+        "- For the CORRECT option, end with a one-line key takeaway.",
+        "- Do not be repetitive across options. Use exam-grade clinical wording. Avoid filler.",
       ].join("\n"),
     user: JSON.stringify({ ...payload, fileText: fileText || undefined }),
     temperature: 0.3,
@@ -1158,8 +1239,8 @@ const generate_recommendation_from_ai = async (req: Request) => {
         "Rules:",
         "- If you cannot produce a section, set it to null (do not omit keys).",
         "- MCQs must be clinically accurate and aligned with the weak area.",
-        "- For each MCQ option, provide a short explanation (1–2 sentences) for why it is correct/incorrect.",
-        "- Keep outputs concise but useful.",
+        "- For each MCQ option, provide 3–5 sentences: rationale, mechanism/pearl vs distractors; for the correct option end with a one-line key takeaway.",
+        "- Do not be repetitive. Exam-grade clinical wording.",
       ].join("\n"),
     user: JSON.stringify(payload),
     temperature: 0.2,
@@ -1215,7 +1296,7 @@ const generate_recommendation_from_ai = async (req: Request) => {
           system: [
             "Fill in missing explanations for the correct option only.",
             "Return ONLY JSON: {\"items\":[{\"key\":\"...\",\"correctExplanation\":\"...\"}]}",
-            "Rules: 1-3 sentences, clinically accurate, no extra keys.",
+            "Rules: 3-5 sentences, clinically accurate: rationale, mechanism/pearl, then a one-line key takeaway at the end. No extra keys.",
           ].join("\n"),
           user: JSON.stringify({ items: missing }),
           temperature: 0,
@@ -1266,7 +1347,7 @@ const generate_recommendation_from_ai = async (req: Request) => {
             system: [
               "Write correct-answer explanations for MCQs.",
               "Return ONLY JSON: {\"items\":[{\"idx\":0,\"correctExplanation\":\"...\"}]}",
-              "Rules: 1-3 sentences, clinically accurate, based only on the provided question + correct option text.",
+              "Rules: 3-5 sentences, clinically accurate, based only on the provided question + correct option text; end with a one-line key takeaway.",
             ].join("\n"),
             user: JSON.stringify({ items: stillMissing }),
             temperature: 0,
