@@ -627,15 +627,97 @@ Rules:
     ).values(),
   );
 
-  const buildFilterForTopic = (t: any): Record<string, any> => {
+  const cleanStr = (v: unknown) => String(v ?? "").trim();
+
+  const buildBaseFilterForTopic = (t: any): Record<string, any> => {
     const f: Record<string, any> = {};
     if (contentForFilter) f.contentFor = contentForFilter;
     if (profileTypeFilter) f.profileType = profileTypeFilter;
-    if (t?.subject) f.subject = t.subject;
-    if (t?.system) f.system = t.system;
-    if (t?.topic) f.topic = t.topic;
-    if (t?.subtopic) f.subtopic = t.subtopic;
+    if (t?.subject) f.subject = cleanStr(t.subject);
+    if (t?.system) f.system = cleanStr(t.system);
+    if (t?.topic) f.topic = cleanStr(t.topic);
+    if (t?.subtopic) f.subtopic = cleanStr(t.subtopic);
     return f;
+  };
+
+  /**
+   * When the exact topic tuple doesn't exist in content collections, we still want
+   * to link something usable rather than leaving tasks unstartable.
+   *
+   * We keep `contentFor` stable, but progressively relax:
+   * - drop profileType
+   * - drop subtopic
+   * - drop topic
+   * - drop system
+   *
+   * This is intentionally conservative: we never drop `subject` or `contentFor`.
+   */
+  const buildCandidateFilters = (t: any): Record<string, any>[] => {
+    const base = buildBaseFilterForTopic(t);
+    const candidates: Record<string, any>[] = [];
+
+    const push = (f: Record<string, any>) => {
+      // Deduplicate by stable JSON key (field order stable here).
+      const key = JSON.stringify(f);
+      if (!seen.has(key)) {
+        seen.add(key);
+        candidates.push(f);
+      }
+    };
+
+    const seen = new Set<string>();
+
+    // Exact
+    push({ ...base });
+    // Without profileType
+    if ("profileType" in base) {
+      const { profileType: _pt, ...noPt } = base;
+      push(noPt);
+    }
+    // Without subtopic (and without profileType)
+    if ("subtopic" in base) {
+      const { subtopic: _st, ...noSubtopic } = base;
+      push(noSubtopic);
+      if ("profileType" in noSubtopic) {
+        const { profileType: _pt2, ...noSubtopicNoPt } = noSubtopic;
+        push(noSubtopicNoPt);
+      }
+    }
+    // Without topic (and without profileType)
+    if ("topic" in base) {
+      const { topic: _t, ...noTopic } = base;
+      delete (noTopic as any).subtopic;
+      push(noTopic);
+      if ("profileType" in noTopic) {
+        const { profileType: _pt3, ...noTopicNoPt } = noTopic;
+        push(noTopicNoPt);
+      }
+    }
+    // Without system (and without profileType)
+    if ("system" in base) {
+      const { system: _s, ...noSystem } = base;
+      delete (noSystem as any).topic;
+      delete (noSystem as any).subtopic;
+      push(noSystem);
+      if ("profileType" in noSystem) {
+        const { profileType: _pt4, ...noSystemNoPt } = noSystem;
+        push(noSystemNoPt);
+      }
+    }
+
+    return candidates;
+  };
+
+  const resolveFirst = async <T>(
+    findOne: (f: Record<string, any>) => Promise<T | null>,
+    filters: Record<string, any>[],
+  ): Promise<T | null> => {
+    for (const f of filters) {
+      // eslint-disable-next-line no-await-in-loop
+      const doc = await findOne(f).catch(() => null);
+      if (doc) return doc;
+    }
+    return null;
   };
 
   const dailyPlanChunkPrompt = (chunk: typeof chunks[0]) => `
@@ -670,20 +752,34 @@ Return ONLY the JSON array. No markdown.
     // Resolve content IDs per unique topic tuple (multi-topic correctness)
     Promise.all(
       uniqueTopics.map(async (t: any) => {
-        const f = buildFilterForTopic(t);
+        const candidates = buildCandidateFilters(t);
+
         const [mcqBank, flashcard, note, clinicalCase] = await Promise.all([
-          McqBankModel.findOne(f)
-            .select("_id mcqs")
-            .sort({ createdAt: -1 })
-            .lean()
-            .catch(() => null),
-          FlashcardModel.findOne(f)
-            .select("_id flashCards")
-            .sort({ createdAt: -1 })
-            .lean()
-            .catch(() => null),
-          notes_model.findOne(f).select("_id").sort({ createdAt: -1 }).lean().catch(() => null),
-          ClinicalCaseModel.findOne(f).select("_id").sort({ createdAt: -1 }).lean().catch(() => null),
+          resolveFirst(
+            (f) =>
+              McqBankModel.findOne(f)
+                .select("_id mcqs")
+                .sort({ createdAt: -1 })
+                .lean(),
+            candidates,
+          ),
+          resolveFirst(
+            (f) =>
+              FlashcardModel.findOne(f)
+                .select("_id flashCards")
+                .sort({ createdAt: -1 })
+                .lean(),
+            candidates,
+          ),
+          resolveFirst(
+            (f) => notes_model.findOne(f).select("_id").sort({ createdAt: -1 }).lean(),
+            candidates,
+          ),
+          resolveFirst(
+            (f) =>
+              ClinicalCaseModel.findOne(f).select("_id").sort({ createdAt: -1 }).lean(),
+            candidates,
+          ),
         ]);
 
         const mb = mcqBank as { _id?: unknown; mcqs?: unknown[] } | null;
