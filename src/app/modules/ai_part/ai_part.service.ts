@@ -1,4 +1,5 @@
 import { Request } from "express";
+import { Types } from "mongoose";
 import fs from "fs";
 import { configs } from "../../configs";
 import { AppError } from "../../utils/app_error";
@@ -637,33 +638,57 @@ Mix task types across days. Return ONLY the JSON array. No markdown.
       ? "smart_study_planner"
       : "smart_study";
 
-  const persistPlan =
+  const persistPlanPromise: Promise<unknown> =
     created_from === "smart_study_planner"
-      ? // Planner should be a single updatable plan per account
-        study_planner_model
-          .findOneAndUpdate(
-            { accountId: req?.user?.accountId, created_from: "smart_study_planner" },
-            {
-              $set: {
-                ...parseData,
-                accountId: req?.user?.accountId,
-                created_from: "smart_study_planner",
-                status: "in_progress",
-              },
-            },
-            { upsert: true, new: true },
+      ? (async () => {
+          const threadId = new Types.ObjectId().toString();
+          const planTitle = String(
+            payload?.title ??
+              payload?.exam_name ??
+              parseData?.exam_name ??
+              "Smart Study Plan",
           )
-          .lean()
-      : // Smart Study (Preference) can create new plans
-        study_planner_model.create({
-          ...parseData,
-          accountId: req?.user?.accountId,
-          created_from: "smart_study",
-          status: "in_progress",
-        });
+            .trim()
+            .slice(0, 120);
+          const sessionTitle = (planTitle.slice(0, 80) || "Study plan").trim();
+
+          await ai_tutor_thread_model.create({
+            accountId: String(req?.user?.accountId ?? ""),
+            thread_id: threadId,
+            session_title: sessionTitle,
+            messages: [],
+          });
+
+          const doc = await study_planner_model.create({
+            ...parseData,
+            accountId: req?.user?.accountId,
+            created_from: "smart_study_planner",
+            status: "in_progress",
+            title: planTitle,
+            thread_id: threadId,
+            selection_snapshot: payload?.selection_snapshot,
+            exam_name: parseData.exam_name ?? payload?.exam_name,
+            exam_date: parseData.exam_date ?? payload?.exam_date,
+            exam_type: parseData.exam_type ?? payload?.exam_type ?? "",
+            start_date: startDate,
+            daily_study_time:
+              parseData.daily_study_time ??
+              Number(payload?.daily_study_time ?? 0),
+            topics: parseData.topics ?? payload?.topics,
+          });
+          return doc.toObject();
+        })()
+      : study_planner_model
+          .create({
+            ...parseData,
+            accountId: req?.user?.accountId,
+            created_from: "smart_study",
+            status: "in_progress",
+          })
+          .then((d) => d.toObject());
 
   const [result] = await Promise.all([
-    persistPlan,
+    persistPlanPromise,
     daily_ai_request_model.updateOne(
       { date: today },
       { $inc: { count: 1 } },
