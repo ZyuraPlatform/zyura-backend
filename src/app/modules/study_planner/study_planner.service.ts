@@ -140,13 +140,45 @@ const save_mcq_attempts_into_db = async (req: Request) => {
   }
 
   const dayBefore = planBefore.daily_plan.find((d) => d.day_number === day);
+  if (!dayBefore) {
+    throw new AppError("Day not found in plan", 404);
+  }
   const taskBefore = dayBefore?.hourly_breakdown?.find((t: any) => {
     const cid = t.suggest_content?.contentId;
     return cid === suggest_content;
   });
+  if (!taskBefore) {
+    throw new AppError("Task not found in plan", 404);
+  }
   const existingIsCompleted = taskBefore?.isCompleted === true;
 
-  const attempted_count = attempts.length;
+  // Merge attempts by questionId so a subsequent partial save cannot overwrite prior progress.
+  const existingAttempts: McqAttemptBody[] = Array.isArray((taskBefore as any)?.attempts)
+    ? ((taskBefore as any).attempts as McqAttemptBody[])
+    : [];
+
+  const byQuestionId = new Map<string, McqAttemptBody>();
+  for (const a of existingAttempts) {
+    const qid = String(a?.questionId ?? "").trim();
+    if (!qid) continue;
+    byQuestionId.set(qid, {
+      questionId: qid,
+      selectedOption: String(a?.selectedOption ?? "").trim(),
+      isCorrect: Boolean(a?.isCorrect),
+    });
+  }
+  for (const a of attempts) {
+    const qid = String(a?.questionId ?? "").trim();
+    if (!qid) continue;
+    byQuestionId.set(qid, {
+      questionId: qid,
+      selectedOption: String(a?.selectedOption ?? "").trim(),
+      isCorrect: Boolean(a?.isCorrect),
+    });
+  }
+
+  const mergedAttempts = Array.from(byQuestionId.values());
+  const attempted_count = mergedAttempts.length;
   const isTaskComplete =
     existingIsCompleted ||
     (total_count > 0 && attempted_count === total_count);
@@ -161,7 +193,7 @@ const save_mcq_attempts_into_db = async (req: Request) => {
         $set: {
           "daily_plan.$[d].hourly_breakdown.$[t].attempted_count": attempted_count,
           "daily_plan.$[d].hourly_breakdown.$[t].total_count": total_count,
-          "daily_plan.$[d].hourly_breakdown.$[t].attempts": attempts,
+          "daily_plan.$[d].hourly_breakdown.$[t].attempts": mergedAttempts,
           "daily_plan.$[d].hourly_breakdown.$[t].isCompleted": isTaskComplete,
         },
       },
