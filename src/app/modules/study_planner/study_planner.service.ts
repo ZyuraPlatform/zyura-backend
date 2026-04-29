@@ -107,13 +107,15 @@ type McqAttemptBody = {
 };
 
 const save_mcq_attempts_into_db = async (req: Request) => {
-  const { planId, day, suggest_content, total_count, attempts } = req.body as {
-    planId: string;
-    day: number;
-    suggest_content: string;
-    total_count: number;
-    attempts: McqAttemptBody[];
-  };
+  const { planId, day, suggest_content, total_count, attempts, finalize } =
+    req.body as {
+      planId: string;
+      day: number;
+      suggest_content: string;
+      total_count: number;
+      attempts: McqAttemptBody[];
+      finalize?: boolean;
+    };
 
   if (
     !planId ||
@@ -127,9 +129,33 @@ const save_mcq_attempts_into_db = async (req: Request) => {
     throw new AppError("Invalid MCQ attempts payload", 400);
   }
 
+  if (finalize !== undefined && typeof finalize !== "boolean") {
+    throw new AppError("Invalid finalize flag", 400);
+  }
+
+  const planBefore = await study_planner_model
+    .findOne({
+      _id: new Types.ObjectId(planId),
+      accountId: req?.user?.accountId,
+    })
+    .lean();
+
+  if (!planBefore) {
+    throw new AppError("Study plan not found", 404);
+  }
+
+  const dayBefore = planBefore.daily_plan.find((d) => d.day_number === day);
+  const taskBefore = dayBefore?.hourly_breakdown?.find((t: any) => {
+    const cid = t.suggest_content?.contentId;
+    return cid === suggest_content;
+  });
+  const existingIsCompleted = taskBefore?.isCompleted === true;
+
   const attempted_count = attempts.length;
   const isTaskComplete =
-    total_count > 0 && attempted_count === total_count;
+    existingIsCompleted ||
+    finalize === true ||
+    (total_count > 0 && attempted_count === total_count);
 
   const afterTaskUpdate = await study_planner_model
     .findOneAndUpdate(
