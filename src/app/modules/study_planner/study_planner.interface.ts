@@ -26,6 +26,13 @@ export type T_StudyPlanner = {
       suggest_content: string[];
       duration_hours: number;
       isCompleted: boolean;
+      attempted_count?: number;
+      total_count?: number;
+      attempts?: {
+        questionId: string;
+        selectedOption: string;
+        isCorrect: boolean;
+      }[];
     }[];
     isCompleted: boolean;
   }[];

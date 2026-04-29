@@ -26,6 +26,12 @@ study_planner_router.put(
 );
 
 study_planner_router.put(
+  "/save-mcq-attempts",
+  auth("STUDENT", "PROFESSIONAL"),
+  study_planner_controller.save_mcq_attempts
+);
+
+study_planner_router.put(
   "/cancel/:planId",
   auth("STUDENT", "PROFESSIONAL"),
   study_planner_controller.cancel_study_plan
