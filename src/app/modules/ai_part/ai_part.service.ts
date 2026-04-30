@@ -1,4 +1,5 @@
 import { Request } from "express";
+import { Types } from "mongoose";
 import fs from "fs";
 import { configs } from "../../configs";
 import { AppError } from "../../utils/app_error";
@@ -358,9 +359,158 @@ const get_all_chat_thread_title_from_ai = async (req: Request) => {
   return data;
 };
 
+/**
+ * Smart study plan: AI returns topics per day only. Backend computes each task's
+ * `limit` and `duration_*` deterministically; `contentId` is resolved from DB
+ * (McqBank, Flashcard, ClinicalCase, Notes) per topic tuple.
+ */
+const TASK_RATES_SECONDS = {
+  mcq: 40,
+  flashcard: 180,
+  clinical_case: 300,
+  note: 900,
+} as const;
+
+type DeterministicTaskKey = keyof typeof TASK_RATES_SECONDS;
+
+const DAILY_MIX: readonly DeterministicTaskKey[] = [
+  "mcq",
+  "flashcard",
+  "clinical_case",
+  "note",
+];
+
+const formatTopicLabel = (t: any): string => {
+  if (!t || typeof t !== "object") return "General";
+  const parts = [t.subject, t.system, t.topic, t.subtopic]
+    .map((x) => String(x ?? "").trim())
+    .filter(Boolean);
+  return parts.length ? parts.join(" · ") : "General";
+};
+
+const taskTypeStringForKey = (key: DeterministicTaskKey): string => {
+  if (key === "clinical_case") return "clinical case";
+  if (key === "note") return "note";
+  return key;
+};
+
+const descriptionForKey = (
+  key: DeterministicTaskKey,
+  topicLabel: string,
+): string => {
+  const title =
+    key === "mcq"
+      ? "MCQ"
+      : key === "flashcard"
+        ? "Flashcards"
+        : key === "clinical_case"
+          ? "Clinical case"
+          : "Notes";
+  return `${title} — ${topicLabel}`;
+};
+
+type TaskIdAndCap = { id: string; cap: number };
+
+const emptyPerTask = (): Record<DeterministicTaskKey, TaskIdAndCap> => ({
+  mcq: { id: "", cap: 0 },
+  flashcard: { id: "", cap: 0 },
+  clinical_case: { id: "", cap: 0 },
+  note: { id: "", cap: 0 },
+});
+
+/**
+ * Equal time slice per task type, count = floor(slice/rate) capped by bank capacity.
+ * Leftover seconds spill to other types (cheapest rate first) until caps or leftover < min rate.
+ */
+const buildDeterministicHourlyBreakdown = (
+  perTask: Record<DeterministicTaskKey, TaskIdAndCap>,
+  dailyStudyHours: number,
+  topicLabel: string,
+): { hourly_breakdown: any[]; total_hours: number } => {
+  const safeHours =
+    Number.isFinite(dailyStudyHours) && dailyStudyHours > 0 ? dailyStudyHours : 4;
+  const dailySec = safeHours * 3600;
+  const sliceSec = dailySec / DAILY_MIX.length;
+
+  const counts: Record<DeterministicTaskKey, number> = {
+    mcq: 0,
+    flashcard: 0,
+    clinical_case: 0,
+    note: 0,
+  };
+
+  for (const key of DAILY_MIX) {
+    const rate = TASK_RATES_SECONDS[key];
+    const cap = perTask[key]?.cap ?? 0;
+    const raw = Math.floor(sliceSec / rate);
+    counts[key] = Math.min(Math.max(0, raw), cap);
+  }
+
+  let used = DAILY_MIX.reduce(
+    (s, k) => s + counts[k] * TASK_RATES_SECONDS[k],
+    0,
+  );
+  let leftover = Math.max(0, dailySec - used);
+
+  const orderByRate = [...DAILY_MIX].sort(
+    (a, b) => TASK_RATES_SECONDS[a] - TASK_RATES_SECONDS[b],
+  );
+
+  let guard = 0;
+  const MAX_SPILL = 500000;
+  while (leftover > 0 && guard < MAX_SPILL) {
+    guard += 1;
+    let progressed = false;
+    for (const k of orderByRate) {
+      const rate = TASK_RATES_SECONDS[k];
+      const cap = perTask[k]?.cap ?? 0;
+      if (counts[k] >= cap) continue;
+      if (leftover < rate) continue;
+      counts[k] += 1;
+      leftover -= rate;
+      progressed = true;
+    }
+    if (!progressed) break;
+  }
+
+  const hourly_breakdown: any[] = [];
+  let totalSecondsAll = 0;
+
+  for (const key of DAILY_MIX) {
+    const rate = TASK_RATES_SECONDS[key];
+    const limit = counts[key];
+    const totalSeconds = limit * rate;
+    totalSecondsAll += totalSeconds;
+
+    const duration_hours = Math.floor(totalSeconds / 3600);
+    const duration_minutes = Math.round((totalSeconds % 3600) / 60);
+
+    const contentId = perTask[key]?.id ?? "";
+
+    hourly_breakdown.push({
+      task_type: taskTypeStringForKey(key),
+      description: descriptionForKey(key, topicLabel),
+      duration_hours,
+      duration_minutes,
+      suggest_content: {
+        contentId,
+        limit,
+      },
+      isCompleted: false,
+    });
+  }
+
+  const total_hours = Math.round((totalSecondsAll / 3600) * 100) / 100;
+  return { hourly_breakdown, total_hours };
+};
+
 // ai_part.service.ts — replace generate_new_study_plan_from_ai
 
-const generate_new_study_plan_from_ai = async (req: Request) => {
+/**
+ * Runs AI + deterministic assembly for a study plan (steps 1–5).
+ * Does not persist. Used by create and by study_planner update/regenerate.
+ */
+const build_study_plan_payload_from_ai_request = async (req: Request) => {
   const isAccount = await isAccountExist(req?.user?.email as string, "profile_id") as any;
   const payload = req?.body;
 
@@ -459,49 +609,136 @@ Rules:
 
   const contentForFilter = payload.contentFor || "student";
   const profileTypeFilter = payload.profileType;
-  const defaultTopic = topics[0] || {};
 
-  const baseFilter: Record<string, any> = {};
-  if (contentForFilter) baseFilter.contentFor = contentForFilter;
-  if (profileTypeFilter) baseFilter.profileType = profileTypeFilter;
-  if (defaultTopic.subject) baseFilter.subject = defaultTopic.subject;
-  if (defaultTopic.system) baseFilter.system = defaultTopic.system;
-  if (defaultTopic.topic) baseFilter.topic = defaultTopic.topic;
-  if (defaultTopic.subtopic) baseFilter.subtopic = defaultTopic.subtopic;
+  const topicKey = (t: any) =>
+    [
+      String(t?.subject ?? ""),
+      String(t?.system ?? ""),
+      String(t?.topic ?? ""),
+      String(t?.subtopic ?? ""),
+    ].join("__");
+
+  // Unique topic tuples from metadata (used to resolve contentIds per topic)
+  const uniqueTopics = Array.from(
+    new Map(
+      topics
+        .filter((t) => t && typeof t === "object")
+        .map((t) => [topicKey(t), t]),
+    ).values(),
+  );
+
+  const cleanStr = (v: unknown) => String(v ?? "").trim();
+
+  const buildBaseFilterForTopic = (t: any): Record<string, any> => {
+    const f: Record<string, any> = {};
+    if (contentForFilter) f.contentFor = contentForFilter;
+    if (profileTypeFilter) f.profileType = profileTypeFilter;
+    if (t?.subject) f.subject = cleanStr(t.subject);
+    if (t?.system) f.system = cleanStr(t.system);
+    if (t?.topic) f.topic = cleanStr(t.topic);
+    if (t?.subtopic) f.subtopic = cleanStr(t.subtopic);
+    return f;
+  };
+
+  /**
+   * When the exact topic tuple doesn't exist in content collections, we still want
+   * to link something usable rather than leaving tasks unstartable.
+   *
+   * We keep `contentFor` stable, but progressively relax:
+   * - drop profileType
+   * - drop subtopic
+   * - drop topic
+   * - drop system
+   *
+   * This is intentionally conservative: we never drop `subject` or `contentFor`.
+   */
+  const buildCandidateFilters = (t: any): Record<string, any>[] => {
+    const base = buildBaseFilterForTopic(t);
+    const candidates: Record<string, any>[] = [];
+
+    const push = (f: Record<string, any>) => {
+      // Deduplicate by stable JSON key (field order stable here).
+      const key = JSON.stringify(f);
+      if (!seen.has(key)) {
+        seen.add(key);
+        candidates.push(f);
+      }
+    };
+
+    const seen = new Set<string>();
+
+    // Exact
+    push({ ...base });
+    // Without profileType
+    if ("profileType" in base) {
+      const { profileType: _pt, ...noPt } = base;
+      push(noPt);
+    }
+    // Without subtopic (and without profileType)
+    if ("subtopic" in base) {
+      const { subtopic: _st, ...noSubtopic } = base;
+      push(noSubtopic);
+      if ("profileType" in noSubtopic) {
+        const { profileType: _pt2, ...noSubtopicNoPt } = noSubtopic;
+        push(noSubtopicNoPt);
+      }
+    }
+    // Without topic (and without profileType)
+    if ("topic" in base) {
+      const { topic: _t, ...noTopic } = base;
+      delete (noTopic as any).subtopic;
+      push(noTopic);
+      if ("profileType" in noTopic) {
+        const { profileType: _pt3, ...noTopicNoPt } = noTopic;
+        push(noTopicNoPt);
+      }
+    }
+    // Without system (and without profileType)
+    if ("system" in base) {
+      const { system: _s, ...noSystem } = base;
+      delete (noSystem as any).topic;
+      delete (noSystem as any).subtopic;
+      push(noSystem);
+      if ("profileType" in noSystem) {
+        const { profileType: _pt4, ...noSystemNoPt } = noSystem;
+        push(noSystemNoPt);
+      }
+    }
+
+    return candidates;
+  };
+
+  const resolveFirst = async <T>(
+    findOne: (f: Record<string, any>) => Promise<T | null>,
+    filters: Record<string, any>[],
+  ): Promise<T | null> => {
+    for (const f of filters) {
+      // eslint-disable-next-line no-await-in-loop
+      const doc = await findOne(f).catch(() => null);
+      if (doc) return doc;
+    }
+    return null;
+  };
 
   const dailyPlanChunkPrompt = (chunk: typeof chunks[0]) => `
 You are a medical study plan generator for the Zyura platform.
 
 Generate ONLY the daily_plan entries for days ${chunk.fromDay} to ${chunk.toDay} (dates ${chunk.fromDate} to ${chunk.toDate}).
 
-Return a JSON array (not wrapped in an object):
-[
-  {
-    "day_number": <number>,
-    "date": "<YYYY-MM-DD>",
-    "total_hours": <number>,
-    "topics": ["<topic string>"],
-    "hourly_breakdown": [
-      {
-        "task_type": "<one of: mcq, flashcard, notes, clinical case, osce>",
-        "description": "<task title mentioning subject/topic>",
-        "duration_hours": <number>,
-        "duration_minutes": <number>,
-        "suggest_content": { "contentId": "", "limit": 10 },
-        "isCompleted": false
-      }
-    ],
-    "isCompleted": false
-  }
-]
+Return a JSON array (not wrapped in an object). Each element MUST have ONLY:
+- "day_number": <number>,
+- "date": "<YYYY-MM-DD>",
+- "topics": ["<short topic focus strings for that day>"]
+
+Do NOT include hourly_breakdown, durations, or suggest_content limits — the server builds exactly four tasks per day (MCQ, flashcards, clinical case, notes) with computed time and item counts.
 
 Topics to cover in this chunk: ${JSON.stringify(chunk.topics)}
-Daily study time: ${enrichedInput.daily_study_time || 4} hours/day
-Mix task types across days. Return ONLY the JSON array. No markdown.
+Daily study time context (hours/day): ${enrichedInput.daily_study_time || 4}
+Return ONLY the JSON array. No markdown.
 `.trim();
 
   // ─── STEP 3: Run all chunk AI calls + DB queries in parallel ──────────────
-  const [chunkResults, mcqBank, flashcard, note, clinicalCase, osce] = await Promise.all([
+  const [chunkResults, topicContentIndex] = await Promise.all([
     // All daily_plan chunks generated simultaneously
     Promise.all(
       chunks.map((chunk) =>
@@ -512,52 +749,111 @@ Mix task types across days. Return ONLY the JSON array. No markdown.
         }).catch(() => [] as any[])
       )
     ),
-    // All DB lookups in parallel
-    McqBankModel.findOne(baseFilter).select("_id").sort({ createdAt: -1 }).lean().catch(() => null),
-    FlashcardModel.findOne(baseFilter).select("_id").sort({ createdAt: -1 }).lean().catch(() => null),
-    notes_model.findOne(baseFilter).select("_id").sort({ createdAt: -1 }).lean().catch(() => null),
-    ClinicalCaseModel.findOne(baseFilter).select("_id").sort({ createdAt: -1 }).lean().catch(() => null),
-    osce_model.findOne(baseFilter).select("_id").sort({ createdAt: -1 }).lean().catch(() => null),
+    // Resolve content IDs per unique topic tuple (multi-topic correctness)
+    Promise.all(
+      uniqueTopics.map(async (t: any) => {
+        const candidates = buildCandidateFilters(t);
+
+        const [mcqBank, flashcard, note, clinicalCase] = await Promise.all([
+          resolveFirst(
+            (f) =>
+              McqBankModel.findOne(f)
+                .select("_id mcqs")
+                .sort({ createdAt: -1 })
+                .lean(),
+            candidates,
+          ),
+          resolveFirst(
+            (f) =>
+              FlashcardModel.findOne(f)
+                .select("_id flashCards")
+                .sort({ createdAt: -1 })
+                .lean(),
+            candidates,
+          ),
+          resolveFirst(
+            (f) => notes_model.findOne(f).select("_id").sort({ createdAt: -1 }).lean(),
+            candidates,
+          ),
+          resolveFirst(
+            (f) =>
+              ClinicalCaseModel.findOne(f).select("_id").sort({ createdAt: -1 }).lean(),
+            candidates,
+          ),
+        ]);
+
+        const mb = mcqBank as { _id?: unknown; mcqs?: unknown[] } | null;
+        const fc = flashcard as { _id?: unknown; flashCards?: unknown[] } | null;
+
+        return {
+          key: topicKey(t),
+          perTask: {
+            mcq: {
+              id: mb?._id?.toString() ?? "",
+              cap: Array.isArray(mb?.mcqs) ? mb.mcqs.length : 0,
+            },
+            flashcard: {
+              id: fc?._id?.toString() ?? "",
+              cap: Array.isArray(fc?.flashCards) ? fc.flashCards.length : 0,
+            },
+            note: {
+              id: note?._id?.toString() ?? "",
+              cap: note ? 1 : 0,
+            },
+            clinical_case: {
+              id: clinicalCase?._id?.toString() ?? "",
+              cap: clinicalCase ? 1 : 0,
+            },
+          } satisfies Record<DeterministicTaskKey, TaskIdAndCap>,
+        };
+      }),
+    ),
   ]);
 
   // ─── STEP 4: Merge chunks + fix dates ─────────────────────────────────────
-  const contentIdMap: Record<string, string> = {
-    mcq:             mcqBank?._id?.toString()      ?? "",
-    mcqs:            mcqBank?._id?.toString()      ?? "",
-    flashcard:       flashcard?._id?.toString()    ?? "",
-    flashcards:      flashcard?._id?.toString()    ?? "",
-    notes:           note?._id?.toString()         ?? "",
-    note:            note?._id?.toString()         ?? "",
-    "clinical case": clinicalCase?._id?.toString() ?? "",
-    clinical_case:   clinicalCase?._id?.toString() ?? "",
-    osce:            osce?._id?.toString()         ?? "",
-  };
+  const contentIndex = new Map<string, Record<DeterministicTaskKey, TaskIdAndCap>>();
+  for (const row of topicContentIndex || []) {
+    if (row?.key) contentIndex.set(String(row.key), row.perTask ?? emptyPerTask());
+  }
 
-  const rawDailyPlan: any[] = chunkResults.flat();
+  const rawDailyPlanFlat: any[] = chunkResults.flat();
+  const dailyStudyHoursNum =
+    Number(enrichedInput.daily_study_time ?? metaData.daily_study_time ?? 4) || 4;
 
-  // Fix all day numbers + dates + inject contentIds in one pass
-  const daily_plan = rawDailyPlan.map((day: any, index: number) => {
+  const daily_plan = Array.from({ length: totalDays }, (_, index) => {
     const dayDate = new Date(start);
     dayDate.setDate(start.getDate() + index);
 
-    const hourly_breakdown = Array.isArray(day.hourly_breakdown)
-      ? day.hourly_breakdown.map((task: any) => {
-          const taskType = String(task.task_type || "").toLowerCase().trim();
-          return {
-            ...task,
-            suggest_content: {
-              contentId: contentIdMap[taskType] ?? "",
-              limit: task.suggest_content?.limit || 10,
-            },
-          };
-        })
-      : [];
+    const dayFromAi = rawDailyPlanFlat[index] || {};
+    const topicForDay = topics.length
+      ? topics[index % topics.length]
+      : null;
+    const perTask = topicForDay
+      ? (contentIndex.get(topicKey(topicForDay)) ?? emptyPerTask())
+      : emptyPerTask();
+
+    const topicLabel = formatTopicLabel(topicForDay);
+    const { hourly_breakdown, total_hours } = buildDeterministicHourlyBreakdown(
+      perTask,
+      dailyStudyHoursNum,
+      topicLabel,
+    );
+
+    const topicsStrings: string[] =
+      Array.isArray(dayFromAi.topics) && dayFromAi.topics.length
+        ? dayFromAi.topics.map((x: any) => String(x))
+        : topicForDay
+          ? [formatTopicLabel(topicForDay)]
+          : [];
 
     return {
-      ...day,
+      ...dayFromAi,
       day_number: index + 1,
       date: dayDate.toISOString().split("T")[0],
+      total_hours,
+      topics: topicsStrings,
       hourly_breakdown,
+      isCompleted: false,
     };
   });
 
@@ -581,13 +877,69 @@ Mix task types across days. Return ONLY the JSON array. No markdown.
     parseData = finalPlan;
   }
 
+  return { parseData, startDate, payload };
+};
+
+const generate_new_study_plan_from_ai = async (req: Request) => {
+  const { parseData, startDate, payload } = await build_study_plan_payload_from_ai_request(req);
+
   // ─── STEP 6: Persist + analytics in parallel ──────────────────────────────
+  const created_from =
+    payload?.created_from === "smart_study_planner"
+      ? "smart_study_planner"
+      : "smart_study";
+
+  const persistPlanPromise: Promise<unknown> =
+    created_from === "smart_study_planner"
+      ? (async () => {
+          const threadId = new Types.ObjectId().toString();
+          const planTitle = String(
+            payload?.title ??
+              payload?.exam_name ??
+              parseData?.exam_name ??
+              "Smart Study Plan",
+          )
+            .trim()
+            .slice(0, 120);
+          const sessionTitle = (planTitle.slice(0, 80) || "Study plan").trim();
+
+          await ai_tutor_thread_model.create({
+            accountId: String(req?.user?.accountId ?? ""),
+            thread_id: threadId,
+            session_title: sessionTitle,
+            messages: [],
+          });
+
+          const doc = await study_planner_model.create({
+            ...parseData,
+            accountId: req?.user?.accountId,
+            created_from: "smart_study_planner",
+            status: "in_progress",
+            title: planTitle,
+            thread_id: threadId,
+            selection_snapshot: payload?.selection_snapshot,
+            exam_name: parseData.exam_name ?? payload?.exam_name,
+            exam_date: parseData.exam_date ?? payload?.exam_date,
+            exam_type: parseData.exam_type ?? payload?.exam_type ?? "",
+            start_date: startDate,
+            daily_study_time:
+              parseData.daily_study_time ??
+              Number(payload?.daily_study_time ?? 0),
+            topics: parseData.topics ?? payload?.topics,
+          });
+          return doc.toObject();
+        })()
+      : study_planner_model
+          .create({
+            ...parseData,
+            accountId: req?.user?.accountId,
+            created_from: "smart_study",
+            status: "in_progress",
+          })
+          .then((d) => d.toObject());
+
   const [result] = await Promise.all([
-    study_planner_model.create({
-      ...parseData,
-      accountId: req?.user?.accountId,
-      status: "in_progress",
-    }),
+    persistPlanPromise,
     daily_ai_request_model.updateOne(
       { date: today },
       { $inc: { count: 1 } },
@@ -669,7 +1021,9 @@ const generate_mcq_from_ai = async (req: Request) => {
         "Return ONLY valid JSON: {\"mcqs\":[{mcqId,difficulty,question,options:[{option,optionText,explanation}],correctOption}]}",
         "- difficulty: Basic|Intermediate|Advance",
         "- correctOption: A|B|C|D|E|F",
-        "- For EACH option provide a short explanation (1–2 sentences) why it is correct/incorrect.",
+        "- For EACH option provide 3–5 sentences: (1) why this option is correct/incorrect, (2) mechanism/pathophysiology/pharmacology rationale, (3) one clinical pearl or differentiator vs other options.",
+        "- For the CORRECT option, end with a one-line key takeaway.",
+        "- Do not be repetitive across options. Use exam-grade clinical wording. Avoid filler.",
       ].join("\n"),
     user: JSON.stringify(payload),
     temperature: 0.3,
@@ -728,7 +1082,7 @@ const generate_mcq_from_ai = async (req: Request) => {
         system: [
           "Fill in missing explanations for the correct option only.",
           "Return ONLY JSON: {\"items\":[{\"key\":\"...\",\"correctExplanation\":\"...\"}]}",
-          "Rules: 1-3 sentences, clinically accurate, no extra keys.",
+          "Rules: 3-5 sentences, clinically accurate: rationale, mechanism/pearl, then a one-line key takeaway at the end. No extra keys.",
         ].join("\n"),
         user: JSON.stringify({ items: missing }),
         temperature: 0,
@@ -916,7 +1270,9 @@ const mcq_generator_from_ai = async (req: Request) => {
         "- options must be labeled A-D (or A-F if needed).",
         "- difficulty: Basic|Intermediate|Advance",
         "- correctOption: A|B|C|D|E|F",
-        "- For EACH option provide a short explanation (1–2 sentences) why it is correct/incorrect.",
+        "- For EACH option provide 3–5 sentences: (1) why this option is correct/incorrect, (2) mechanism/pathophysiology/pharmacology rationale, (3) one clinical pearl or differentiator vs other options.",
+        "- For the CORRECT option, end with a one-line key takeaway.",
+        "- Do not be repetitive across options. Use exam-grade clinical wording. Avoid filler.",
       ].join("\n"),
     user: JSON.stringify({ ...payload, fileText: fileText || undefined }),
     temperature: 0.3,
@@ -1057,8 +1413,8 @@ const generate_recommendation_from_ai = async (req: Request) => {
         "Rules:",
         "- If you cannot produce a section, set it to null (do not omit keys).",
         "- MCQs must be clinically accurate and aligned with the weak area.",
-        "- For each MCQ option, provide a short explanation (1–2 sentences) for why it is correct/incorrect.",
-        "- Keep outputs concise but useful.",
+        "- For each MCQ option, provide 3–5 sentences: rationale, mechanism/pearl vs distractors; for the correct option end with a one-line key takeaway.",
+        "- Do not be repetitive. Exam-grade clinical wording.",
       ].join("\n"),
     user: JSON.stringify(payload),
     temperature: 0.2,
@@ -1114,7 +1470,7 @@ const generate_recommendation_from_ai = async (req: Request) => {
           system: [
             "Fill in missing explanations for the correct option only.",
             "Return ONLY JSON: {\"items\":[{\"key\":\"...\",\"correctExplanation\":\"...\"}]}",
-            "Rules: 1-3 sentences, clinically accurate, no extra keys.",
+            "Rules: 3-5 sentences, clinically accurate: rationale, mechanism/pearl, then a one-line key takeaway at the end. No extra keys.",
           ].join("\n"),
           user: JSON.stringify({ items: missing }),
           temperature: 0,
@@ -1165,7 +1521,7 @@ const generate_recommendation_from_ai = async (req: Request) => {
             system: [
               "Write correct-answer explanations for MCQs.",
               "Return ONLY JSON: {\"items\":[{\"idx\":0,\"correctExplanation\":\"...\"}]}",
-              "Rules: 1-3 sentences, clinically accurate, based only on the provided question + correct option text.",
+              "Rules: 3-5 sentences, clinically accurate, based only on the provided question + correct option text; end with a one-line key takeaway.",
             ].join("\n"),
             user: JSON.stringify({ items: stillMissing }),
             temperature: 0,
@@ -1213,6 +1569,7 @@ export const ai_part_service = {
   chat_with_ai_tutor_from_ai,
   get_all_chat_history_from_ai,
   get_all_chat_thread_title_from_ai,
+  build_study_plan_payload_from_ai_request,
   generate_new_study_plan_from_ai,
   generate_flashcard_from_ai,
   generate_mcq_from_ai,

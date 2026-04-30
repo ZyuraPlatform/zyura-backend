@@ -36,6 +36,16 @@ const save_study_plan_progress = catchAsync(async (req, res) => {
   });
 });
 
+const save_mcq_attempts = catchAsync(async (req, res) => {
+  const result = await study_planner_service.save_mcq_attempts_into_db(req);
+  manageResponse(res, {
+    statusCode: httpStatus.OK,
+    success: true,
+    message: "MCQ attempts saved successfully",
+    data: result,
+  });
+});
+
 const cancel_study_plan = catchAsync(async (req, res) => {
   const result = await study_planner_service.cancel_study_plan_from_db(req);
   manageResponse(res, {
@@ -56,10 +66,22 @@ const delete_study_plan = catchAsync(async (req, res) => {
   });
 });
 
+const update_study_plan = catchAsync(async (req, res) => {
+  const result = await study_planner_service.update_study_plan_in_db(req);
+  manageResponse(res, {
+    statusCode: httpStatus.OK,
+    success: true,
+    message: "Study plan updated successfully",
+    data: result,
+  });
+});
+
 export const study_planner_controller = {
   get_all_study_plan,
   get_single_study_plan,   // ← new
   save_study_plan_progress,
+  save_mcq_attempts,
   cancel_study_plan,
   delete_study_plan,
+  update_study_plan,
 };
