@@ -67,12 +67,17 @@ export function setupSocket(_io: Server) {
       const key = socket.handshake.query.key as string;
       if (!authToken) return;
 
+      console.log("🔍 Verifying admin token:", { authToken: authToken ? 'present' : 'missing', socketId: socket.id });
       const verifiedUser = jwtHelpers.verifyToken(
         authToken,
         configs.jwt.access_token as string,
       );
+      console.log("🔍 JWT verify result:", verifiedUser ? { accountId: verifiedUser.accountId, role: verifiedUser.role, email: verifiedUser.email } : 'FAILED');
 
-      if (!verifiedUser?.email || !verifiedUser?.accountId) return;
+      if (!verifiedUser?.email || !verifiedUser?.accountId) {
+        console.log("❌ JWT invalid - missing email/accountId, skipping socket register");
+        return;
+      }
 
       // ⏱ session start
       onlineUsers.set(socket.id, {

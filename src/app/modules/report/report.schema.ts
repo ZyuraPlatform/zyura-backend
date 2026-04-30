@@ -11,7 +11,8 @@ const report_schema = new Schema<T_Report>({
         text: { type: String, required: true },
     },
     status: { type: String, enum: ["IN_REVIEW", "RESOLVED", "REJECTED"], default: "IN_REVIEW" },
-    note:{type:String}
+    note: { type: String },
+    read: { type: Boolean, default: false },  // ✅ NEW: track read/unread
 }, { versionKey: false, timestamps: true });
 
 export const report_model = model("report", report_schema);

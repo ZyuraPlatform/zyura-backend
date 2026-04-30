@@ -10,4 +10,5 @@ export type T_Report = {
   };
   status: "IN_REVIEW" | "RESOLVED" | "REJECTED",
   note:string
+  read?: boolean;
 }
