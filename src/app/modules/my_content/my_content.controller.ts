@@ -14,7 +14,8 @@ const get_all_my_generated_mcq = catchAsync(async (req, res) => {
   });
 });
 const get_single_my_generated_mcq = catchAsync(async (req, res) => {
-  const result = await my_content_service.get_single_my_generated_mcq_from_db(req?.params?.id as string);
+  const limit = req?.query?.limit ? Number(req.query.limit) : undefined;
+  const result = await my_content_service.get_single_my_generated_mcq_from_db(req?.params?.id as string, limit);
   manageResponse(res, {
     statusCode: httpStatus.OK,
     success: true,

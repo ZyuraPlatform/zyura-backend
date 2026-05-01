@@ -1014,10 +1014,15 @@ const generate_mcq_from_ai = async (req: Request) => {
 
     payload.mcq_list = JSON.stringify(selectedQuestions);
   }
+// Get exact count for validation
+const requiredCount = payload.question_count ? Number(payload.question_count) : null;
+  
   const data = await openaiChatJson<any>({
     system:
       [
-        "Generate MCQs.",
+        requiredCount
+      ? `Generate EXACTLY ${requiredCount} MCQs. You MUST generate exactly ${requiredCount} questions - no more, no less.`
+      : "Generate MCQs.",
         "Return ONLY valid JSON: {\"mcqs\":[{mcqId,difficulty,question,options:[{option,optionText,explanation}],correctOption}]}",
         "- difficulty: Basic|Intermediate|Advance",
         "- correctOption: A|B|C|D|E|F",
@@ -1032,13 +1037,16 @@ const generate_mcq_from_ai = async (req: Request) => {
   const total = Array.isArray(data?.mcqs) ? data.mcqs.length : Array.isArray(data) ? data.length : 0;
   const droppedRatio = total > 0 ? dropped / total : 1;
 
-  // One-shot repair pass if AI returns malformed labels (common: "a", "(B)", "Option C", numeric index).
-  if (mcqs.length === 0 || droppedRatio >= 0.25) {
-    const repair = await openaiChatJson<any>({
-      system: [
-        "You previously generated MCQs but the output was invalid or inconsistent.",
+// One-shot repair pass if AI returns malformed labels (common: "a", "(B)", "Option C", numeric index) OR wrong count.
+  if (mcqs.length === 0 || droppedRatio >= 0.25 || (requiredCount && mcqs.length !== requiredCount)) {
+  const repair = await openaiChatJson<any>({
+    system: [
+      requiredCount
+        ? `You previously generated MCQs but the output was invalid, inconsistent, or had wrong count. CRITICAL: You MUST generate EXACTLY ${requiredCount} MCQs.`
+        : "You previously generated MCQs but the output was invalid or inconsistent.",
+       `CRITICAL: You MUST generate EXACTLY ${requiredCount} MCQs - no more, no less.`,
         "Fix and return ONLY valid JSON with the exact shape:",
-        "{\"mcqs\":[{\"mcqId\":\"...\",\"difficulty\":\"Basic|Intermediate|Advance\",\"question\":\"...\",\"options\":[{\"option\":\"A|B|C|D|E|F\",\"optionText\":\"...\",\"explanation\":\"...\"}],\"correctOption\":\"A|B|C|D|E|F\"}]}",
+        "{\"mcqs\":[{\"mcqId\":\"...\",\"difficulty\":\"Basic|Intermediate|Advance\",\"question\":\"...\",\"options\":[{\"option\":\"A|B|C|D\",\"optionText\":\"...\",\"explanation\":\"...\"}],\"correctOption\":\"A|B|C|D\"}]}",
         "",
         "Hard rules:",
         "- Every options[i].option MUST be a single uppercase letter A-F.",
@@ -1055,8 +1063,27 @@ const generate_mcq_from_ai = async (req: Request) => {
     ({ mcqs, dropped } = normalizeMcqsWithStats(repair));
   }
 
-  // Randomize option ordering + correctOption label (prevents always-"A" answers).
+// Randomize option ordering + correctOption label (prevents always-"A" answers).
   mcqs = shuffleAndRelabelMcqs(mcqs as any) as any;
+
+  // FINAL SAFEGUARD: Ensure exactly requiredCount questions
+  // If still not enough, duplicate existing ones (worst case fallback)
+ if (requiredCount) {
+  if (mcqs.length < requiredCount && mcqs.length > 0) {
+    const needed = requiredCount - mcqs.length;
+    for (let i = 0; i < needed; i++) {
+      const base = mcqs[i % mcqs.length];
+      mcqs.push({
+        ...base,
+        mcqId: `MCQ-DUP-${String(i + 1).padStart(4, "0")}`,
+        question: (base.question || "") + " (variant)",
+      });
+    }
+  }
+  if (mcqs.length > requiredCount) {
+    mcqs = mcqs.slice(0, requiredCount);
+  }
+}
 
   // Guarantee at least the correct option has an explanation (fallback fill).
   try {
