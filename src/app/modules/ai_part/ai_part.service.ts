@@ -272,22 +272,22 @@ const chat_with_ai_tutor_from_ai = async (req: Request) => {
   const isWritingAssist = classification.category === "writing_assist";
   const systemPrompt = isWritingAssist
     ? [
-        "You are Zyura Writing Assistant.",
-        "Task: draft short professional templates (emails/messages/letters) related to healthcare or the Zyura platform.",
-        "",
-        "Rules:",
-        "- Do NOT give medical advice, diagnosis, treatment, or interpret clinical results.",
-        "- Keep the output concise and practical.",
-        "- Use neutral placeholders like [Your Name], [DOB], [Date], [Phone].",
-        "- If critical info is missing, make safe assumptions and use placeholders (do not ask back-and-forth questions).",
-        "- Output plain text only (no markdown).",
-      ].join("\n")
+      "You are Zyura Writing Assistant.",
+      "Task: draft short professional templates (emails/messages/letters) related to healthcare or the Zyura platform.",
+      "",
+      "Rules:",
+      "- Do NOT give medical advice, diagnosis, treatment, or interpret clinical results.",
+      "- Keep the output concise and practical.",
+      "- Use neutral placeholders like [Your Name], [DOB], [Date], [Phone].",
+      "- If critical info is missing, make safe assumptions and use placeholders (do not ask back-and-forth questions).",
+      "- Output plain text only (no markdown).",
+    ].join("\n")
     : [
-        "You are Zyura AI Tutor.",
-        "Scope: medical/clinical questions, medical exam prep (OSCE/MCQs/study strategy), and Zyura platform help.",
-        "If the user asks anything outside this scope, do NOT answer it; politely redirect them back to medical questions or Zyura usage questions.",
-        "Be concise, clinically accurate, and explain reasoning step-by-step when needed.",
-      ].join("\n");
+      "You are Zyura AI Tutor.",
+      "Scope: medical/clinical questions, medical exam prep (OSCE/MCQs/study strategy), and Zyura platform help.",
+      "If the user asks anything outside this scope, do NOT answer it; politely redirect them back to medical questions or Zyura usage questions.",
+      "Be concise, clinically accurate, and explain reasoning step-by-step when needed.",
+    ].join("\n");
 
   const messagesForOpenAI = [
     { role: "system" as const, content: systemPrompt },
@@ -422,6 +422,7 @@ const emptyPerTask = (): Record<DeterministicTaskKey, TaskIdAndCap> => ({
  * Equal time slice per task type, count = floor(slice/rate) capped by bank capacity.
  * Leftover seconds spill to other types (cheapest rate first) until caps or leftover < min rate.
  */
+
 const buildDeterministicHourlyBreakdown = (
   perTask: Record<DeterministicTaskKey, TaskIdAndCap>,
   dailyStudyHours: number,
@@ -430,7 +431,7 @@ const buildDeterministicHourlyBreakdown = (
   const safeHours =
     Number.isFinite(dailyStudyHours) && dailyStudyHours > 0 ? dailyStudyHours : 4;
   const dailySec = safeHours * 3600;
-  const sliceSec = dailySec / DAILY_MIX.length; // Equal slice per content type
+  const sliceSec = dailySec / DAILY_MIX.length; // Equal time slice per content type
 
   const hourly_breakdown: any[] = [];
   let totalSecondsAll = 0;
@@ -439,9 +440,19 @@ const buildDeterministicHourlyBreakdown = (
     const rate = TASK_RATES_SECONDS[key];
     const cap = perTask[key]?.cap ?? 0;
 
-    // Count = floor(equal slice / rate), capped by actual content available
-    const limit = Math.min(Math.max(0, Math.floor(sliceSec / rate)), cap);
-    const totalSeconds = limit * rate;
+    let limit: number;
+    let totalSeconds: number;
+
+    if (key === "note" || key === "clinical_case") {
+      // Show ALL available items regardless of time — don't cap by slice
+      limit = cap;
+      totalSeconds = limit * rate;
+    } else {
+      // MCQ + Flashcard: fit as many as possible within the time slice
+      limit = Math.min(Math.max(0, Math.floor(sliceSec / rate)), cap);
+      totalSeconds = limit * rate;
+    }
+
     totalSecondsAll += totalSeconds;
 
     const duration_hours = Math.floor(totalSeconds / 3600);
@@ -505,10 +516,59 @@ const build_study_plan_payload_from_ai_request = async (req: Request) => {
   const startDate = payload.start_date || new Date().toISOString().split("T")[0];
   const enrichedInput = { ...payload, start_date: startDate, userProfile: profileContext };
 
-  // ─── STEP 1: Generate plan metadata + topic list only (fast, small response) ──
+  // ─── STEP 1: Fetch real topics from DB across ALL content types ──────────────
+  const contentForFilter = payload.contentFor || "student";
+  const profileTypeFilter = payload.profileType;
+
+  const baseMatch: Record<string, any> = { contentFor: contentForFilter };
+  if (profileTypeFilter) baseMatch.profileType = profileTypeFilter;
+
+  const [mcqTopics, flashcardTopics, noteTopics, clinicalCaseTopics] = await Promise.all([
+    McqBankModel.find(baseMatch).select("subject system topic subtopic").lean(),
+    FlashcardModel.find(baseMatch).select("subject system topic subtopic").lean(),
+    notes_model.find(baseMatch).select("subject system topic subtopic").lean(),
+    ClinicalCaseModel.find(baseMatch).select("subject system topic subtopic").lean(),
+  ]);
+
+  const allDbDocs = [...mcqTopics, ...flashcardTopics, ...noteTopics, ...clinicalCaseTopics];
+
+  const cleanStr = (v: unknown) => String(v ?? "").trim();
+
+  const seenKeys = new Set<string>();
+  const formattedDbTopics: Array<{ subject: string; system: string; topic: string; subtopic: string }> = [];
+
+  for (const doc of allDbDocs) {
+    const t = {
+      subject: cleanStr((doc as any).subject),
+      system: cleanStr((doc as any).system),
+      topic: cleanStr((doc as any).topic),
+      subtopic: cleanStr((doc as any).subtopic),
+    };
+    if (!t.subject || !t.system || !t.topic || !t.subtopic) continue;
+    const key = `${t.subject}__${t.system}__${t.topic}__${t.subtopic}`;
+    if (!seenKeys.has(key)) {
+      seenKeys.add(key);
+      formattedDbTopics.push(t);
+    }
+  }
+
+  if (!formattedDbTopics.length) {
+    throw new AppError("No content found in DB for this user profile. Please add content first.", 400);
+  }
+
+  const dbTopicSet = new Set(formattedDbTopics.map((t) => `${t.subject}__${t.system}__${t.topic}__${t.subtopic}`));
+
   const metaPrompt = `
 You are a medical study plan generator for the Zyura platform.
 
+CRITICAL RULE:
+You MUST ONLY use topics from the DATABASE TOPICS list below.
+DO NOT create, modify, rename, or assume any topic outside this list.
+
+DATABASE TOPICS (use EXACT values, copy-paste only):
+${JSON.stringify(formattedDbTopics, null, 2)}
+
+TASK:
 Generate ONLY the plan metadata and topics list as valid JSON. Do NOT include daily_plan.
 
 Schema:
@@ -524,9 +584,13 @@ Schema:
   ]
 }
 
-Rules:
-- topics list must have enough entries to cover all days (aim for 1 topic per day or group).
-- Return ONLY valid JSON. No markdown, no explanation.
+STRICT RULES:
+1. ONLY pick topics from DATABASE TOPICS above.
+2. Copy subject/system/topic/subtopic values EXACTLY — no rewording, no formatting changes.
+3. topics list must cover all days (repeat topics for spaced repetition if needed).
+4. DO NOT generate new topics. DO NOT combine or split topics.
+5.topics list must have enough entries to cover all days (aim for 1 topic per day or group).
+Return ONLY valid JSON. No markdown, no explanation.
 `.trim();
 
   const metaData = await openaiChatJson<any>({
@@ -534,6 +598,16 @@ Rules:
     user: JSON.stringify(enrichedInput),
     temperature: 0.2,
   });
+
+  // Filter out any AI-hallucinated topics not in DB
+  metaData.topics = (metaData.topics || []).filter((t: any) => {
+    const key = `${cleanStr(t.subject)}__${cleanStr(t.system)}__${cleanStr(t.topic)}__${cleanStr(t.subtopic)}`;
+    return dbTopicSet.has(key);
+  });
+
+  if (!metaData.topics.length) {
+    throw new AppError("AI generated topics that don't match any DB content. Please try again.", 400);
+  }
 
   const totalDays: number = metaData.total_days || 30;
   const topics: any[] = Array.isArray(metaData.topics) ? metaData.topics : [];
@@ -567,9 +641,6 @@ Rules:
     });
   }
 
-  const contentForFilter = payload.contentFor || "student";
-  const profileTypeFilter = payload.profileType;
-
   const topicKey = (t: any) =>
     [
       String(t?.subject ?? ""),
@@ -586,8 +657,6 @@ Rules:
         .map((t) => [topicKey(t), t]),
     ).values(),
   );
-
-  const cleanStr = (v: unknown) => String(v ?? "").trim();
 
   const buildBaseFilterForTopic = (t: any): Record<string, any> => {
     const f: Record<string, any> = {};
@@ -615,6 +684,7 @@ Rules:
   const buildCandidateFilters = (t: any): Record<string, any>[] => {
     const base = buildBaseFilterForTopic(t);
     const candidates: Record<string, any>[] = [];
+    const seen = new Set<string>();
 
     const push = (f: Record<string, any>) => {
       // Deduplicate by stable JSON key (field order stable here).
@@ -625,9 +695,6 @@ Rules:
       }
     };
 
-    const seen = new Set<string>();
-
-    // Exact
     push({ ...base });
     // Without profileType
     if ("profileType" in base) {
@@ -748,27 +815,31 @@ Return ONLY the JSON array. No markdown.
           Number(enrichedInput.daily_study_time ?? metaData.daily_study_time ?? 4) || 4;
 
         const sliceSecPerTask = (dailyStudyHoursNum * 3600) / DAILY_MIX.length;
-        const noteCap = Math.max(1, Math.floor(sliceSecPerTask / TASK_RATES_SECONDS.note));
-        const clinicalCaseCap = Math.max(1, Math.floor(sliceSecPerTask / TASK_RATES_SECONDS.clinical_case));
+
+        // MCQ: count of actual mcq items in the bank
+        const mcqCap = Array.isArray(mb?.mcqs) ? mb.mcqs.length : 0;
+        // const mcqLimit = Math.min(Math.max(0, Math.floor(sliceSecPerTask / TASK_RATES_SECONDS.mcq)), mcqCap);
+
+        // Flashcard: count of actual flashcard items
+        const fcCap = Array.isArray(fc?.flashCards) ? fc.flashCards.length : 0;
+       // const fcLimit = Math.min(Math.max(0, Math.floor(sliceSecPerTask / TASK_RATES_SECONDS.flashcard)), fcCap);
+
+        // Notes: show ALL available notes for the topic (cap = actual count of note docs, not time-based)
+        // We fetch count of note docs for this topic
+        const noteDocCount = await notes_model.countDocuments(buildBaseFilterForTopic(t)).catch(() => 0);
+        const noteCap = noteDocCount; // show all notes, not time-capped
+
+        // Clinical case: count of actual clinical case docs for this topic  
+        const clinicalCaseDocCount = await ClinicalCaseModel.countDocuments(buildBaseFilterForTopic(t)).catch(() => 0);
+        const clinicalCaseCap = clinicalCaseDocCount;
+
         return {
           key: topicKey(t),
           perTask: {
-            mcq: {
-              id: mb?._id?.toString() ?? "",
-              cap: Array.isArray(mb?.mcqs) ? mb.mcqs.length : 0,
-            },
-            flashcard: {
-              id: fc?._id?.toString() ?? "",
-              cap: Array.isArray(fc?.flashCards) ? fc.flashCards.length : 0,
-            },
-            note: {
-              id: note?._id?.toString() ?? "",
-              cap: note ? noteCap : 0,
-            },
-            clinical_case: {
-              id: clinicalCase?._id?.toString() ?? "",
-              cap: clinicalCase ? clinicalCaseCap : 0,
-            },
+            mcq: { id: mb?._id?.toString() ?? "", cap: mcqCap },           // raw item count, sliced in breakdown fn
+            flashcard: { id: fc?._id?.toString() ?? "", cap: fcCap },      // raw item count, sliced in breakdown fn
+            note: { id: note?._id?.toString() ?? "", cap: noteCap },       // doc count, shown all
+            clinical_case: { id: clinicalCase?._id?.toString() ?? "", cap: clinicalCaseCap }, // doc count, shown all
           } satisfies Record<DeterministicTaskKey, TaskIdAndCap>,
         };
       }),
@@ -857,51 +928,51 @@ const generate_new_study_plan_from_ai = async (req: Request) => {
   const persistPlanPromise: Promise<unknown> =
     created_from === "smart_study_planner"
       ? (async () => {
-          const threadId = new Types.ObjectId().toString();
-          const planTitle = String(
-            payload?.title ??
-              payload?.exam_name ??
-              parseData?.exam_name ??
-              "Smart Study Plan",
-          )
-            .trim()
-            .slice(0, 120);
-          const sessionTitle = (planTitle.slice(0, 80) || "Study plan").trim();
+        const threadId = new Types.ObjectId().toString();
+        const planTitle = String(
+          payload?.title ??
+          payload?.exam_name ??
+          parseData?.exam_name ??
+          "Smart Study Plan",
+        )
+          .trim()
+          .slice(0, 120);
+        const sessionTitle = (planTitle.slice(0, 80) || "Study plan").trim();
 
-          await ai_tutor_thread_model.create({
-            accountId: String(req?.user?.accountId ?? ""),
-            thread_id: threadId,
-            session_title: sessionTitle,
-            messages: [],
-          });
+        await ai_tutor_thread_model.create({
+          accountId: String(req?.user?.accountId ?? ""),
+          thread_id: threadId,
+          session_title: sessionTitle,
+          messages: [],
+        });
 
-          const doc = await study_planner_model.create({
-            ...parseData,
-            accountId: req?.user?.accountId,
-            created_from: "smart_study_planner",
-            status: "in_progress",
-            title: planTitle,
-            thread_id: threadId,
-            selection_snapshot: payload?.selection_snapshot,
-            exam_name: parseData.exam_name ?? payload?.exam_name,
-            exam_date: parseData.exam_date ?? payload?.exam_date,
-            exam_type: parseData.exam_type ?? payload?.exam_type ?? "",
-            start_date: startDate,
-            daily_study_time:
-              parseData.daily_study_time ??
-              Number(payload?.daily_study_time ?? 0),
-            topics: parseData.topics ?? payload?.topics,
-          });
-          return doc.toObject();
-        })()
+        const doc = await study_planner_model.create({
+          ...parseData,
+          accountId: req?.user?.accountId,
+          created_from: "smart_study_planner",
+          status: "in_progress",
+          title: planTitle,
+          thread_id: threadId,
+          selection_snapshot: payload?.selection_snapshot,
+          exam_name: parseData.exam_name ?? payload?.exam_name,
+          exam_date: parseData.exam_date ?? payload?.exam_date,
+          exam_type: parseData.exam_type ?? payload?.exam_type ?? "",
+          start_date: startDate,
+          daily_study_time:
+            parseData.daily_study_time ??
+            Number(payload?.daily_study_time ?? 0),
+          topics: parseData.topics ?? payload?.topics,
+        });
+        return doc.toObject();
+      })()
       : study_planner_model
-          .create({
-            ...parseData,
-            accountId: req?.user?.accountId,
-            created_from: "smart_study",
-            status: "in_progress",
-          })
-          .then((d) => d.toObject());
+        .create({
+          ...parseData,
+          accountId: req?.user?.accountId,
+          created_from: "smart_study",
+          status: "in_progress",
+        })
+        .then((d) => d.toObject());
 
   const [result] = await Promise.all([
     persistPlanPromise,
@@ -979,15 +1050,15 @@ const generate_mcq_from_ai = async (req: Request) => {
 
     payload.mcq_list = JSON.stringify(selectedQuestions);
   }
-// Get exact count for validation
-const requiredCount = payload.question_count ? Number(payload.question_count) : null;
-  
+  // Get exact count for validation
+  const requiredCount = payload.question_count ? Number(payload.question_count) : null;
+
   const data = await openaiChatJson<any>({
     system:
       [
         requiredCount
-      ? `Generate EXACTLY ${requiredCount} MCQs. You MUST generate exactly ${requiredCount} questions - no more, no less.`
-      : "Generate MCQs.",
+          ? `Generate EXACTLY ${requiredCount} MCQs. You MUST generate exactly ${requiredCount} questions - no more, no less.`
+          : "Generate MCQs.",
         "Return ONLY valid JSON: {\"mcqs\":[{mcqId,difficulty,question,options:[{option,optionText,explanation}],correctOption}]}",
         "- difficulty: Basic|Intermediate|Advance",
         "- correctOption: A|B|C|D|E|F",
@@ -1002,14 +1073,14 @@ const requiredCount = payload.question_count ? Number(payload.question_count) : 
   const total = Array.isArray(data?.mcqs) ? data.mcqs.length : Array.isArray(data) ? data.length : 0;
   const droppedRatio = total > 0 ? dropped / total : 1;
 
-// One-shot repair pass if AI returns malformed labels (common: "a", "(B)", "Option C", numeric index) OR wrong count.
+  // One-shot repair pass if AI returns malformed labels (common: "a", "(B)", "Option C", numeric index) OR wrong count.
   if (mcqs.length === 0 || droppedRatio >= 0.25 || (requiredCount && mcqs.length !== requiredCount)) {
-  const repair = await openaiChatJson<any>({
-    system: [
-      requiredCount
-        ? `You previously generated MCQs but the output was invalid, inconsistent, or had wrong count. CRITICAL: You MUST generate EXACTLY ${requiredCount} MCQs.`
-        : "You previously generated MCQs but the output was invalid or inconsistent.",
-       `CRITICAL: You MUST generate EXACTLY ${requiredCount} MCQs - no more, no less.`,
+    const repair = await openaiChatJson<any>({
+      system: [
+        requiredCount
+          ? `You previously generated MCQs but the output was invalid, inconsistent, or had wrong count. CRITICAL: You MUST generate EXACTLY ${requiredCount} MCQs.`
+          : "You previously generated MCQs but the output was invalid or inconsistent.",
+        `CRITICAL: You MUST generate EXACTLY ${requiredCount} MCQs - no more, no less.`,
         "Fix and return ONLY valid JSON with the exact shape:",
         "{\"mcqs\":[{\"mcqId\":\"...\",\"difficulty\":\"Basic|Intermediate|Advance\",\"question\":\"...\",\"options\":[{\"option\":\"A|B|C|D\",\"optionText\":\"...\",\"explanation\":\"...\"}],\"correctOption\":\"A|B|C|D\"}]}",
         "",
@@ -1028,27 +1099,27 @@ const requiredCount = payload.question_count ? Number(payload.question_count) : 
     ({ mcqs, dropped } = normalizeMcqsWithStats(repair));
   }
 
-// Randomize option ordering + correctOption label (prevents always-"A" answers).
+  // Randomize option ordering + correctOption label (prevents always-"A" answers).
   mcqs = shuffleAndRelabelMcqs(mcqs as any) as any;
 
   // FINAL SAFEGUARD: Ensure exactly requiredCount questions
   // If still not enough, duplicate existing ones (worst case fallback)
- if (requiredCount) {
-  if (mcqs.length < requiredCount && mcqs.length > 0) {
-    const needed = requiredCount - mcqs.length;
-    for (let i = 0; i < needed; i++) {
-      const base = mcqs[i % mcqs.length];
-      mcqs.push({
-        ...base,
-        mcqId: `MCQ-DUP-${String(i + 1).padStart(4, "0")}`,
-        question: (base.question || "") + " (variant)",
-      });
+  if (requiredCount) {
+    if (mcqs.length < requiredCount && mcqs.length > 0) {
+      const needed = requiredCount - mcqs.length;
+      for (let i = 0; i < needed; i++) {
+        const base = mcqs[i % mcqs.length];
+        mcqs.push({
+          ...base,
+          mcqId: `MCQ-DUP-${String(i + 1).padStart(4, "0")}`,
+          question: (base.question || "") + " (variant)",
+        });
+      }
+    }
+    if (mcqs.length > requiredCount) {
+      mcqs = mcqs.slice(0, requiredCount);
     }
   }
-  if (mcqs.length > requiredCount) {
-    mcqs = mcqs.slice(0, requiredCount);
-  }
-}
 
   // Guarantee at least the correct option has an explanation (fallback fill).
   try {
@@ -1061,11 +1132,11 @@ const requiredCount = payload.question_count ? Number(payload.question_count) : 
         return explanation
           ? null
           : {
-              key: String(m?.mcqId ?? "").trim() || `idx:${idx}`,
-              question: String(m?.question ?? ""),
-              correctOption: correct,
-              optionText: String(correctOpt?.optionText ?? ""),
-            };
+            key: String(m?.mcqId ?? "").trim() || `idx:${idx}`,
+            question: String(m?.question ?? ""),
+            correctOption: correct,
+            optionText: String(correctOpt?.optionText ?? ""),
+          };
       })
       .filter(Boolean);
 
@@ -1414,17 +1485,17 @@ const generate_recommendation_from_ai = async (req: Request) => {
   const normalizedData =
     data && typeof data === "object" && !Array.isArray(data)
       ? {
-          post_quiz_recommendations: data.post_quiz_recommendations ?? null,
-          clinical_case: data.clinical_case ?? null,
-          flashcards: data.flashcards ?? null,
-          notes: data.notes ?? null,
-        }
+        post_quiz_recommendations: data.post_quiz_recommendations ?? null,
+        clinical_case: data.clinical_case ?? null,
+        flashcards: data.flashcards ?? null,
+        notes: data.notes ?? null,
+      }
       : {
-          post_quiz_recommendations: null,
-          clinical_case: null,
-          flashcards: null,
-          notes: null,
-        };
+        post_quiz_recommendations: null,
+        clinical_case: null,
+        flashcards: null,
+        notes: null,
+      };
 
   // Randomize recommended MCQ correctOption labels too.
   try {
@@ -1449,11 +1520,11 @@ const generate_recommendation_from_ai = async (req: Request) => {
           return explanation
             ? null
             : {
-                key: String(m?.mcqId ?? "").trim() || `idx:${idx}`,
-                question: String(m?.question ?? ""),
-                correctOption: correct,
-                optionText: String(correctOpt?.optionText ?? ""),
-              };
+              key: String(m?.mcqId ?? "").trim() || `idx:${idx}`,
+              question: String(m?.question ?? ""),
+              correctOption: correct,
+              optionText: String(correctOpt?.optionText ?? ""),
+            };
         })
         .filter(Boolean);
 
@@ -1500,11 +1571,11 @@ const generate_recommendation_from_ai = async (req: Request) => {
             return explanation
               ? null
               : {
-                  idx,
-                  question: String(m?.question ?? ""),
-                  correctOption: correct,
-                  optionText: String(correctOpt?.optionText ?? ""),
-                };
+                idx,
+                question: String(m?.question ?? ""),
+                correctOption: correct,
+                optionText: String(correctOpt?.optionText ?? ""),
+              };
           })
           .filter(Boolean);
 
