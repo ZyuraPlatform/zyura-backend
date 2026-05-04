@@ -422,7 +422,6 @@ const emptyPerTask = (): Record<DeterministicTaskKey, TaskIdAndCap> => ({
  * Equal time slice per task type, count = floor(slice/rate) capped by bank capacity.
  * Leftover seconds spill to other types (cheapest rate first) until caps or leftover < min rate.
  */
-
 const buildDeterministicHourlyBreakdown = (
   perTask: Record<DeterministicTaskKey, TaskIdAndCap>,
   dailyStudyHours: number,
@@ -431,48 +430,25 @@ const buildDeterministicHourlyBreakdown = (
   const safeHours =
     Number.isFinite(dailyStudyHours) && dailyStudyHours > 0 ? dailyStudyHours : 4;
   const dailySec = safeHours * 3600;
-  const sliceSec = dailySec / DAILY_MIX.length;
-
+  const sliceSec = dailySec / DAILY_MIX.length; // Equal time slice per content type
+ 
   const hourly_breakdown: any[] = [];
   let totalSecondsAll = 0;
-
+ 
   for (const key of DAILY_MIX) {
     const rate = TASK_RATES_SECONDS[key];
     const cap = perTask[key]?.cap ?? 0;
-
-    let limit: number;
-    let totalSeconds: number;
-    let duplicatesNeeded = false;
-
-    if (key === "note" || key === "clinical_case") {
-      // Show ALL available items regardless of time
-      limit = cap;
-      totalSeconds = limit * rate;
-    } else {
-      // MCQ + Flashcard: how many does the time slice demand?
-      const timeBasedLimit = Math.max(0, Math.floor(sliceSec / rate));
-
-      if (cap === 0) {
-        // Nothing in DB at all
-        limit = 0;
-        totalSeconds = 0;
-      } else if (cap >= timeBasedLimit) {
-        // Enough content — no duplication needed
-        limit = timeBasedLimit;
-        totalSeconds = limit * rate;
-      } else {
-        // Not enough content — use what exists and flag for duplication
-        limit = timeBasedLimit;          // ← still show the full required count
-        duplicatesNeeded = true;         // ← consumer must cycle/duplicate
-        totalSeconds = limit * rate;
-      }
-    }
-
+ 
+    // Calculate items that fit in the time slice, capped by database capacity
+    const timeBasedLimit = Math.max(0, Math.floor(sliceSec / rate));
+    const limit = Math.min(timeBasedLimit, cap);
+    const totalSeconds = limit * rate;
+ 
     totalSecondsAll += totalSeconds;
-
+ 
     const duration_hours = Math.floor(totalSeconds / 3600);
     const duration_minutes = Math.round((totalSeconds % 3600) / 60);
-
+ 
     hourly_breakdown.push({
       task_type: taskTypeStringForKey(key),
       description: descriptionForKey(key, topicLabel),
@@ -481,13 +457,14 @@ const buildDeterministicHourlyBreakdown = (
       suggest_content: {
         contentId: perTask[key]?.id ?? "",
         limit,
-        availableCount: cap,               // ← actual DB count
-        duplicatesNeeded,                  // ← true when limit > availableCount
       },
-      isCompleted: false,
+      completedCount: 0,
+      totalCount: limit,
+      isTaskCompleted: false,
+      percentComplete: 0,
     });
   }
-
+ 
   const total_hours = Math.round((totalSecondsAll / 3600) * 100) / 100;
   return { hourly_breakdown, total_hours };
 };
