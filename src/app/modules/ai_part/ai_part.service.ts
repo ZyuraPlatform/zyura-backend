@@ -431,7 +431,7 @@ const buildDeterministicHourlyBreakdown = (
   const safeHours =
     Number.isFinite(dailyStudyHours) && dailyStudyHours > 0 ? dailyStudyHours : 4;
   const dailySec = safeHours * 3600;
-  const sliceSec = dailySec / DAILY_MIX.length; // Equal time slice per content type
+  const sliceSec = dailySec / DAILY_MIX.length;
 
   const hourly_breakdown: any[] = [];
   let totalSecondsAll = 0;
@@ -442,15 +442,30 @@ const buildDeterministicHourlyBreakdown = (
 
     let limit: number;
     let totalSeconds: number;
+    let duplicatesNeeded = false;
 
     if (key === "note" || key === "clinical_case") {
-      // Show ALL available items regardless of time — don't cap by slice
+      // Show ALL available items regardless of time
       limit = cap;
       totalSeconds = limit * rate;
     } else {
-      // MCQ + Flashcard: fit as many as possible within the time slice
-      limit = Math.min(Math.max(0, Math.floor(sliceSec / rate)), cap);
-      totalSeconds = limit * rate;
+      // MCQ + Flashcard: how many does the time slice demand?
+      const timeBasedLimit = Math.max(0, Math.floor(sliceSec / rate));
+
+      if (cap === 0) {
+        // Nothing in DB at all
+        limit = 0;
+        totalSeconds = 0;
+      } else if (cap >= timeBasedLimit) {
+        // Enough content — no duplication needed
+        limit = timeBasedLimit;
+        totalSeconds = limit * rate;
+      } else {
+        // Not enough content — use what exists and flag for duplication
+        limit = timeBasedLimit;          // ← still show the full required count
+        duplicatesNeeded = true;         // ← consumer must cycle/duplicate
+        totalSeconds = limit * rate;
+      }
     }
 
     totalSecondsAll += totalSeconds;
@@ -466,6 +481,8 @@ const buildDeterministicHourlyBreakdown = (
       suggest_content: {
         contentId: perTask[key]?.id ?? "",
         limit,
+        availableCount: cap,               // ← actual DB count
+        duplicatesNeeded,                  // ← true when limit > availableCount
       },
       isCompleted: false,
     });
