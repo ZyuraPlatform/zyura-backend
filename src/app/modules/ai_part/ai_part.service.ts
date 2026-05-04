@@ -561,7 +561,7 @@ const build_study_plan_payload_from_ai_request = async (req: Request) => {
       topic: cleanStr((doc as any).topic),
       subtopic: cleanStr((doc as any).subtopic),
     };
-    if (!t.subject || !t.system || !t.topic || !t.subtopic) continue;
+    if (!t.subject || !t.system || !t.topic) continue; // subtopic optional
     const key = `${t.subject}__${t.system}__${t.topic}__${t.subtopic}`;
     if (!seenKeys.has(key)) {
       seenKeys.add(key);
