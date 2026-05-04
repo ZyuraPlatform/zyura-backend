@@ -66,8 +66,22 @@ const get_all_my_generated_mcq_from_db = async (req: Request) => {
   };
 };
 
-const get_single_my_generated_mcq_from_db = async (id: string) => {
+const get_single_my_generated_mcq_from_db = async (id: string, limit?: number) => {
   const result = await my_content_mcq_bank_model.findById(id);
+  
+   if (!result) {
+    return result;
+  }
+
+  // If limit is specified, return only the requested number of questions
+  if (limit && Array.isArray(result.mcqs)) {
+    const doc = result.toObject(); // convert Mongoose doc to plain object first
+    return {
+      ...doc,
+      mcqs: doc.mcqs.slice(0, limit),
+    };
+  }
+  
   return result;
 };
 

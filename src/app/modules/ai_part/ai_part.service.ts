@@ -430,62 +430,22 @@ const buildDeterministicHourlyBreakdown = (
   const safeHours =
     Number.isFinite(dailyStudyHours) && dailyStudyHours > 0 ? dailyStudyHours : 4;
   const dailySec = safeHours * 3600;
-  const sliceSec = dailySec / DAILY_MIX.length;
-
-  const counts: Record<DeterministicTaskKey, number> = {
-    mcq: 0,
-    flashcard: 0,
-    clinical_case: 0,
-    note: 0,
-  };
-
-  for (const key of DAILY_MIX) {
-    const rate = TASK_RATES_SECONDS[key];
-    const cap = perTask[key]?.cap ?? 0;
-    const raw = Math.floor(sliceSec / rate);
-    counts[key] = Math.min(Math.max(0, raw), cap);
-  }
-
-  let used = DAILY_MIX.reduce(
-    (s, k) => s + counts[k] * TASK_RATES_SECONDS[k],
-    0,
-  );
-  let leftover = Math.max(0, dailySec - used);
-
-  const orderByRate = [...DAILY_MIX].sort(
-    (a, b) => TASK_RATES_SECONDS[a] - TASK_RATES_SECONDS[b],
-  );
-
-  let guard = 0;
-  const MAX_SPILL = 500000;
-  while (leftover > 0 && guard < MAX_SPILL) {
-    guard += 1;
-    let progressed = false;
-    for (const k of orderByRate) {
-      const rate = TASK_RATES_SECONDS[k];
-      const cap = perTask[k]?.cap ?? 0;
-      if (counts[k] >= cap) continue;
-      if (leftover < rate) continue;
-      counts[k] += 1;
-      leftover -= rate;
-      progressed = true;
-    }
-    if (!progressed) break;
-  }
+  const sliceSec = dailySec / DAILY_MIX.length; // Equal slice per content type
 
   const hourly_breakdown: any[] = [];
   let totalSecondsAll = 0;
 
   for (const key of DAILY_MIX) {
     const rate = TASK_RATES_SECONDS[key];
-    const limit = counts[key];
+    const cap = perTask[key]?.cap ?? 0;
+
+    // Count = floor(equal slice / rate), capped by actual content available
+    const limit = Math.min(Math.max(0, Math.floor(sliceSec / rate)), cap);
     const totalSeconds = limit * rate;
     totalSecondsAll += totalSeconds;
 
     const duration_hours = Math.floor(totalSeconds / 3600);
     const duration_minutes = Math.round((totalSeconds % 3600) / 60);
-
-    const contentId = perTask[key]?.id ?? "";
 
     hourly_breakdown.push({
       task_type: taskTypeStringForKey(key),
@@ -493,7 +453,7 @@ const buildDeterministicHourlyBreakdown = (
       duration_hours,
       duration_minutes,
       suggest_content: {
-        contentId,
+        contentId: perTask[key]?.id ?? "",
         limit,
       },
       isCompleted: false,
@@ -784,7 +744,12 @@ Return ONLY the JSON array. No markdown.
 
         const mb = mcqBank as { _id?: unknown; mcqs?: unknown[] } | null;
         const fc = flashcard as { _id?: unknown; flashCards?: unknown[] } | null;
+        const dailyStudyHoursNum =
+          Number(enrichedInput.daily_study_time ?? metaData.daily_study_time ?? 4) || 4;
 
+        const sliceSecPerTask = (dailyStudyHoursNum * 3600) / DAILY_MIX.length;
+        const noteCap = Math.max(1, Math.floor(sliceSecPerTask / TASK_RATES_SECONDS.note));
+        const clinicalCaseCap = Math.max(1, Math.floor(sliceSecPerTask / TASK_RATES_SECONDS.clinical_case));
         return {
           key: topicKey(t),
           perTask: {
@@ -798,11 +763,11 @@ Return ONLY the JSON array. No markdown.
             },
             note: {
               id: note?._id?.toString() ?? "",
-              cap: note ? 1 : 0,
+              cap: note ? noteCap : 0,
             },
             clinical_case: {
               id: clinicalCase?._id?.toString() ?? "",
-              cap: clinicalCase ? 1 : 0,
+              cap: clinicalCase ? clinicalCaseCap : 0,
             },
           } satisfies Record<DeterministicTaskKey, TaskIdAndCap>,
         };
@@ -1014,10 +979,15 @@ const generate_mcq_from_ai = async (req: Request) => {
 
     payload.mcq_list = JSON.stringify(selectedQuestions);
   }
+// Get exact count for validation
+const requiredCount = payload.question_count ? Number(payload.question_count) : null;
+  
   const data = await openaiChatJson<any>({
     system:
       [
-        "Generate MCQs.",
+        requiredCount
+      ? `Generate EXACTLY ${requiredCount} MCQs. You MUST generate exactly ${requiredCount} questions - no more, no less.`
+      : "Generate MCQs.",
         "Return ONLY valid JSON: {\"mcqs\":[{mcqId,difficulty,question,options:[{option,optionText,explanation}],correctOption}]}",
         "- difficulty: Basic|Intermediate|Advance",
         "- correctOption: A|B|C|D|E|F",
@@ -1032,13 +1002,16 @@ const generate_mcq_from_ai = async (req: Request) => {
   const total = Array.isArray(data?.mcqs) ? data.mcqs.length : Array.isArray(data) ? data.length : 0;
   const droppedRatio = total > 0 ? dropped / total : 1;
 
-  // One-shot repair pass if AI returns malformed labels (common: "a", "(B)", "Option C", numeric index).
-  if (mcqs.length === 0 || droppedRatio >= 0.25) {
-    const repair = await openaiChatJson<any>({
-      system: [
-        "You previously generated MCQs but the output was invalid or inconsistent.",
+// One-shot repair pass if AI returns malformed labels (common: "a", "(B)", "Option C", numeric index) OR wrong count.
+  if (mcqs.length === 0 || droppedRatio >= 0.25 || (requiredCount && mcqs.length !== requiredCount)) {
+  const repair = await openaiChatJson<any>({
+    system: [
+      requiredCount
+        ? `You previously generated MCQs but the output was invalid, inconsistent, or had wrong count. CRITICAL: You MUST generate EXACTLY ${requiredCount} MCQs.`
+        : "You previously generated MCQs but the output was invalid or inconsistent.",
+       `CRITICAL: You MUST generate EXACTLY ${requiredCount} MCQs - no more, no less.`,
         "Fix and return ONLY valid JSON with the exact shape:",
-        "{\"mcqs\":[{\"mcqId\":\"...\",\"difficulty\":\"Basic|Intermediate|Advance\",\"question\":\"...\",\"options\":[{\"option\":\"A|B|C|D|E|F\",\"optionText\":\"...\",\"explanation\":\"...\"}],\"correctOption\":\"A|B|C|D|E|F\"}]}",
+        "{\"mcqs\":[{\"mcqId\":\"...\",\"difficulty\":\"Basic|Intermediate|Advance\",\"question\":\"...\",\"options\":[{\"option\":\"A|B|C|D\",\"optionText\":\"...\",\"explanation\":\"...\"}],\"correctOption\":\"A|B|C|D\"}]}",
         "",
         "Hard rules:",
         "- Every options[i].option MUST be a single uppercase letter A-F.",
@@ -1055,8 +1028,27 @@ const generate_mcq_from_ai = async (req: Request) => {
     ({ mcqs, dropped } = normalizeMcqsWithStats(repair));
   }
 
-  // Randomize option ordering + correctOption label (prevents always-"A" answers).
+// Randomize option ordering + correctOption label (prevents always-"A" answers).
   mcqs = shuffleAndRelabelMcqs(mcqs as any) as any;
+
+  // FINAL SAFEGUARD: Ensure exactly requiredCount questions
+  // If still not enough, duplicate existing ones (worst case fallback)
+ if (requiredCount) {
+  if (mcqs.length < requiredCount && mcqs.length > 0) {
+    const needed = requiredCount - mcqs.length;
+    for (let i = 0; i < needed; i++) {
+      const base = mcqs[i % mcqs.length];
+      mcqs.push({
+        ...base,
+        mcqId: `MCQ-DUP-${String(i + 1).padStart(4, "0")}`,
+        question: (base.question || "") + " (variant)",
+      });
+    }
+  }
+  if (mcqs.length > requiredCount) {
+    mcqs = mcqs.slice(0, requiredCount);
+  }
+}
 
   // Guarantee at least the correct option has an explanation (fallback fill).
   try {
