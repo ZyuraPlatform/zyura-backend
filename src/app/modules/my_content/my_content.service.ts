@@ -263,22 +263,22 @@ const update_tracking = async (req: Request) => {
         }
       : {}),
   };
-  const result = await my_content_mcq_bank_model.findByIdAndUpdate(
-    id,
-    {
-      isCompleted: true,
-      $set: trackingUpdate,
-    },
-    {
-      new: true,
-    }
-  );
-  await updatePointHelper(
-    req?.user?.role as string,
-    req?.user?.accountId as string
-  );
-  return result;
-};
+//   const result = await my_content_mcq_bank_model.findByIdAndUpdate(
+//     id,
+//     {
+//       isCompleted: true,
+//       $set: trackingUpdate,
+//     },
+//     {
+//       new: true,
+//     }
+//   );
+//   await updatePointHelper(
+//     req?.user?.role as string,
+//     req?.user?.accountId as string
+//   );
+ //  return result;
+ };
 
 const get_all_my_generated_notes_from_db = async (req: Request) => {
   const user = req?.user;

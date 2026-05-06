@@ -460,7 +460,7 @@ const buildDeterministicHourlyBreakdown = (
       },
       completedCount: 0,
       totalCount: limit,
-      isTaskCompleted: false,
+      isCompleted: false,
       percentComplete: 0,
     });
   }

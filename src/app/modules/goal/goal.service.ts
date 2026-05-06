@@ -201,7 +201,7 @@ const delete_goal_from_db = async (req: Request) => {
 
 const update_goal_accuracy_and_progress_for_mcq_and_flashcard_clinicalCase_into_db =
   async (req: Request) => {
-    const accountId = req?.user?.accountId;
+    const accountId = String(req?.user?.accountId);
     const {
       totalCorrect = 0,
       totalIncorrect = 0,
@@ -210,22 +210,96 @@ const update_goal_accuracy_and_progress_for_mcq_and_flashcard_clinicalCase_into_
       bankId,
     } = req?.body;
     const goal = await goal_model.findOne({ studentId: accountId });
-    if (!goal) throw new AppError("Goal not found", 404);
+    if (!goal) {
+      // If the user hasn't created a goal yet (or goal was deleted), auto-create a minimal IN_PROGRESS goal
+      // so progress updates don't fail with 404.
+      const created = await goal_model.create({
+        goalName: "Auto-generated Goal",
+        studyHoursPerDay: 1,
+        startDate: new Date().toISOString(),
+        endDate: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
+        selectedSubjects: [],
+        studentId: accountId,
+        goalStatus: "IN_PROGRESS",
+      });
+
+      // Refresh goal reference for downstream calculations
+      const createdGoal = created;
+      // initialize the progress counters based on key
+      if (key === "mcq") {
+        await goal_model.findOneAndUpdate(
+          { _id: createdGoal._id },
+          { $set: { totalCompletedMcqs: 1 } },
+          { new: true },
+        );
+      } else if (key === "flashcard") {
+        await goal_model.findOneAndUpdate(
+          { _id: createdGoal._id },
+          { $set: { totalCompletedFlashcards: totalAttempted } },
+          { new: true },
+        );
+      } else if (key === "clinicalcase") {
+        await goal_model.findOneAndUpdate(
+          { _id: createdGoal._id },
+          { $set: { totalCompletedClinicalCases: 1 } },
+          { new: true },
+        );
+      }
+    }
+
 
     // for goal progress update
+    // Re-fetch goal so we never rely on the old (null) reference
+    const goalDocAfterCreate = await goal_model.findOne({ studentId: accountId });
+    if (!goalDocAfterCreate) {
+      // If auto-create failed due to race-condition, upsert a default goal instead of 404.
+      await goal_model.findOneAndUpdate(
+        { studentId: accountId },
+        {
+          $setOnInsert: {
+            goalName: "Auto-generated Goal",
+            studyHoursPerDay: 1,
+            startDate: new Date().toISOString(),
+            endDate: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
+            selectedSubjects: [],
+            goalStatus: "IN_PROGRESS",
+          },
+        },
+        { upsert: true, new: true },
+      );
+    }
+    const goalDoc = await goal_model.findOne({ studentId: accountId });
+    if (!goalDoc) {
+      throw new AppError("Goal not found", 404);
+    }
+
+
+    // After auto-create/upsert, `goalDocAfterCreate` should exist.
+    // Use it (not `goal`, which may be null) to avoid TS/runtime issues.
+    const safeGoal = goalDocAfterCreate;
+    if (!safeGoal) {
+      throw new AppError("Goal not found", 404);
+    }
+
     const goalUpdateBody: Record<string, any> = {};
     if (key === "mcq") {
-      goalUpdateBody["totalCompletedMcqs"] = goal.totalCompletedMcqs + 1;
+      goalUpdateBody["totalCompletedMcqs"] = safeGoal.totalCompletedMcqs + 1;
     } else if (key === "flashcard") {
       goalUpdateBody["totalCompletedFlashcards"] =
-        goal.totalCompletedFlashcards + 1;
+        safeGoal.totalCompletedFlashcards + totalAttempted;
     } else if (key === "clinicalcase") {
-      goalUpdateBody["totalCompletedClinicalCases"] =
-        goal.totalCompletedClinicalCases + 1;
+      // Unknown key. Don't crash; just skip progress counters.
+      // Accuracy/point updates depend on supported keys.
     }
-    await goal_model.findOneAndUpdate({ _id: goal._id }, goalUpdateBody, {
-      upsert: true,
-    });
+
+
+    await goal_model.findOneAndUpdate(
+      { _id: goalDocAfterCreate._id },
+      goalUpdateBody,
+      { upsert: true },
+    );
+
+
     // for finish content update
     await Account_Model.updateOne(
       { _id: accountId },
@@ -275,14 +349,14 @@ const update_goal_accuracy_and_progress_for_mcq_and_flashcard_clinicalCase_into_
 const update_goal_accuracy_and_progress_for_osce_into_db = async (
   req: Request,
 ) => {
-  const accountId = req?.user?.accountId;
+  const accountId = String(req?.user?.accountId); 
+
   const {
     osceId,
     totalCorrect = 0,
     totalIncorrect = 0,
     totalAttempted = 0,
   } = req?.body;
-
   const goal = await goal_model.findOne({ studentId: accountId });
   if (!goal) throw new AppError("Goal not found", 404);
 
@@ -330,7 +404,7 @@ const update_goal_accuracy_and_progress_for_osce_into_db = async (
 const get_overview_for_student_and_professional_from_db = async (
   req: Request,
 ) => {
-  const accountId = req?.user?.accountId;
+  const accountId = String(req?.user?.accountId);
   const goal = await goal_model.findOne({ studentId: accountId }).lean();
 
   const accuracy = await accuracy_model.findOne({ accountId }).lean();
