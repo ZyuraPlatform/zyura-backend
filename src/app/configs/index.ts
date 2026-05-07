@@ -69,10 +69,10 @@ export const configs = {
         }
     },
     mailgun: {
-        smtp_host: process.env.SMTP_HOST,
-        smtp_port: process.env.SMTP_PORT,
-        smtp_user: process.env.SMTP_USER,
-        smtp_pass: process.env.SMTP_PASSWORD,
-        from: process.env.SMTP_FROM
+        smtp_host: process.env.MAILGUN_SMTP_HOST,
+        smtp_port: process.env.MAILGUN_SMTP_PORT,
+        smtp_user: process.env.MAILGUN_SMTP_USER,
+        smtp_pass: process.env.MAILGUN_SMTP_PASS,
+        from: process.env.MAILGUN_FROM
     }
 }

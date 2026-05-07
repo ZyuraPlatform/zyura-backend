@@ -18,21 +18,19 @@ type SendMailResult =
   | { ok: false; skipped: true; reason: string }
   | { ok: false; skipped: false; error: unknown };
 
-const getTransporter = () => {
-  const host = configs.mailgun.smtp_host;
-  const portStr = configs.mailgun.smtp_port;
-  const user = configs.mailgun.smtp_user;
-  const pass = configs.mailgun.smtp_pass;
+const getTransporter = async () => {
+  const testAccount = await nodemailer.createTestAccount();
 
-  const port = portStr ? Number(portStr) : NaN;
-
-  if (!host || !Number.isFinite(port) || !user || !pass) return null;
+  console.log("TEST ACCOUNT:", testAccount);
 
   return nodemailer.createTransport({
-    host,
-    port,
-    secure: port === 465,
-    auth: { user, pass },
+    host: "smtp.ethereal.email",
+    port: 587,
+    secure: false,
+    auth: {
+      user: testAccount.user,
+      pass: testAccount.pass,
+    },
   });
 };
 
@@ -72,7 +70,7 @@ const sendMail = async (payload: TMailContent): Promise<SendMailResult> => {
   }
 
   const from = configs.mailgun.from;
-  const transporter = getTransporter();
+  const transporter = await getTransporter();
 
   // Local/dev fallback: don't fail flows if SMTP isn't configured.
   if (!from || !transporter) {
@@ -95,6 +93,8 @@ const sendMail = async (payload: TMailContent): Promise<SendMailResult> => {
       text: payload.textBody,
       html: payload.htmlBody,
     });
+
+    console.log("Preview URL:", nodemailer.getTestMessageUrl(info));
 
     return { ok: true, info };
   } catch (error) {

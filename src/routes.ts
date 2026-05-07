@@ -30,6 +30,7 @@ import study_mode_tree_router from "./app/modules/study_mode_tree/study_mode_tre
 import study_plannerRoute from "./app/modules/study_planner/study_planner.route";
 import trackingRoute from "./app/modules/tracking/tracking.route";
 import web_settingRoute from "./app/modules/web_setting/web_setting.route";
+import contactRoute from "./app/modules/contact/contact.route";
 
 const appRouter = Router();
 
@@ -65,6 +66,7 @@ const moduleRoutes = [
   { path: "/flash-card", route: flash_card_router },
   { path: "/mcq-bank", route: mcqBankRouter },
   { path: "/admin", route: adminRouter },
+  { path: "/contact", route: contactRoute },
 ];
 
 moduleRoutes.forEach((route) => appRouter.use(route.path, route.route));
