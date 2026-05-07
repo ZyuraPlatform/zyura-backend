@@ -23,8 +23,20 @@ export type T_StudyPlanner = {
     hourly_breakdown: {
       task_type: string;
       description: string;
-      suggest_content: string[];
+      suggest_content: {
+        contentId: string;
+        limit: number;
+        filterSnapshot?: {
+          contentFor?: string;
+          profileType?: string;
+          subject?: string;
+          system?: string;
+          topic?: string;
+          subtopic?: string;
+        };
+      };
       duration_hours: number;
+      duration_minutes?: number;
       isCompleted: boolean;
       attempted_count?: number;
       total_count?: number;
@@ -33,6 +45,7 @@ export type T_StudyPlanner = {
         selectedOption: string;
         isCorrect: boolean;
       }[];
+      attempted_case_ids?: string[];
     }[];
     isCompleted: boolean;
   }[];

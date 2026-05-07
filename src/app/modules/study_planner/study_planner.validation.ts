@@ -38,6 +38,16 @@ const create = z.object({
           suggest_content: z.object({
             contentId: z.string(),
             limit: z.number(),
+            filterSnapshot: z
+              .object({
+                contentFor: z.string().optional(),
+                profileType: z.string().optional(),
+                subject: z.string().optional(),
+                system: z.string().optional(),
+                topic: z.string().optional(),
+                subtopic: z.string().optional(),
+              })
+              .optional(),
           }),
         }),
       ),

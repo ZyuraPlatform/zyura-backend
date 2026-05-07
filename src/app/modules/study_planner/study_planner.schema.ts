@@ -15,6 +15,14 @@ export interface IHourlyBreakdown {
   suggest_content: {
     contentId: string;
     limit: number;
+    filterSnapshot?: {
+      contentFor?: string;
+      profileType?: string;
+      subject?: string;
+      system?: string;
+      topic?: string;
+      subtopic?: string;
+    };
   };
   isCompleted: boolean;
   /** MCQ progress: how many questions answered in this bank task */
@@ -23,6 +31,8 @@ export interface IHourlyBreakdown {
   total_count?: number;
   /** Per-question attempt snapshot for resume / review */
   attempts?: IMcqAttemptEntry[];
+  /** Clinical-case progress: unique attempted case ids */
+  attempted_case_ids?: string[];
 }
 export interface IDailyPlanEntry {
   day_number: number;
@@ -35,6 +45,14 @@ export interface IDailyPlanEntry {
 const SuggestContentSchema = new Schema({
   contentId: { type: String, },
   limit: { type: Number, },
+  filterSnapshot: {
+    contentFor: { type: String, required: false },
+    profileType: { type: String, required: false },
+    subject: { type: String, required: false },
+    system: { type: String, required: false },
+    topic: { type: String, required: false },
+    subtopic: { type: String, required: false },
+  },
 }, { _id: false });
 
 const McqAttemptEntrySchema = new Schema<IMcqAttemptEntry>(
@@ -57,6 +75,7 @@ const HourlyBreakdownSchema = new Schema<IHourlyBreakdown>(
     attempted_count: { type: Number, required: false, min: 0 },
     total_count: { type: Number, required: false, min: 0 },
     attempts: { type: [McqAttemptEntrySchema], required: false, default: undefined },
+    attempted_case_ids: { type: [String], required: false, default: undefined },
   },
   { _id: false },
 );

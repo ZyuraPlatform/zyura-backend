@@ -410,6 +410,14 @@ const descriptionForKey = (
 };
 
 type TaskIdAndCap = { id: string; cap: number };
+type TopicFilterSnapshot = {
+  contentFor?: string;
+  profileType?: string;
+  subject?: string;
+  system?: string;
+  topic?: string;
+  subtopic?: string;
+};
 
 const emptyPerTask = (): Record<DeterministicTaskKey, TaskIdAndCap> => ({
   mcq: { id: "", cap: 0 },
@@ -426,6 +434,7 @@ const buildDeterministicHourlyBreakdown = (
   perTask: Record<DeterministicTaskKey, TaskIdAndCap>,
   dailyStudyHours: number,
   topicLabel: string,
+  filterSnapshot?: TopicFilterSnapshot,
 ): { hourly_breakdown: any[]; total_hours: number } => {
   const safeHours =
     Number.isFinite(dailyStudyHours) && dailyStudyHours > 0 ? dailyStudyHours : 4;
@@ -457,6 +466,7 @@ const buildDeterministicHourlyBreakdown = (
       suggest_content: {
         contentId: perTask[key]?.id ?? "",
         limit,
+        filterSnapshot: filterSnapshot ?? {},
       },
       completedCount: 0,
       totalCount: limit,
@@ -863,10 +873,21 @@ Return ONLY the JSON array. No markdown.
       : emptyPerTask();
 
     const topicLabel = formatTopicLabel(topicForDay);
+    const snapshot: TopicFilterSnapshot | undefined = topicForDay
+      ? {
+          contentFor: contentForFilter,
+          profileType: profileTypeFilter,
+          subject: cleanStr(topicForDay.subject),
+          system: cleanStr(topicForDay.system),
+          topic: cleanStr(topicForDay.topic),
+          subtopic: cleanStr(topicForDay.subtopic),
+        }
+      : undefined;
     const { hourly_breakdown, total_hours } = buildDeterministicHourlyBreakdown(
       perTask,
       dailyStudyHoursNum,
       topicLabel,
+      snapshot,
     );
 
     const topicsStrings: string[] =

@@ -46,6 +46,16 @@ const save_mcq_attempts = catchAsync(async (req, res) => {
   });
 });
 
+const save_clinical_case_attempt = catchAsync(async (req, res) => {
+  const result = await study_planner_service.save_clinical_case_attempt_into_db(req);
+  manageResponse(res, {
+    statusCode: httpStatus.OK,
+    success: true,
+    message: "Clinical case attempt saved successfully",
+    data: result,
+  });
+});
+
 const cancel_study_plan = catchAsync(async (req, res) => {
   const result = await study_planner_service.cancel_study_plan_from_db(req);
   manageResponse(res, {
@@ -81,6 +91,7 @@ export const study_planner_controller = {
   get_single_study_plan,   // ← new
   save_study_plan_progress,
   save_mcq_attempts,
+  save_clinical_case_attempt,
   cancel_study_plan,
   delete_study_plan,
   update_study_plan,

@@ -41,6 +41,12 @@ study_planner_router.put(
 );
 
 study_planner_router.put(
+  "/save-clinical-attempt",
+  auth("STUDENT", "PROFESSIONAL"),
+  study_planner_controller.save_clinical_case_attempt
+);
+
+study_planner_router.put(
   "/cancel/:planId",
   auth("STUDENT", "PROFESSIONAL"),
   study_planner_controller.cancel_study_plan
